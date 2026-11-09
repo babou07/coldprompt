@@ -1,0 +1,29 @@
+{
+  "name": "coldprompt-agent-orchestrator",
+  "version": "0.4.0-alpha.1",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "coldprompt": "bin/coldprompt" },
+  "scripts": {
+    "start": "tsx src/cli.ts run",
+    "console": "tsx src/cli.ts console",
+    "web": "tsx src/cli.ts web",
+    "status": "tsx src/cli.ts status",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test --test-timeout=20000 tests/*.test.ts",
+    "test:integration": "COLDPROMPT_INTEGRATION=1 node --import tsx --test tests/integration/*.test.ts",
+    "doctor": "tsx src/cli.ts doctor"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.77.0",
+    "yaml": "^2.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}

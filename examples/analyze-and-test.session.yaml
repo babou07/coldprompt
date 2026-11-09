@@ -1,0 +1,33 @@
+# One session = one Codex thread. Paths in coldprompt.yaml are relative to it.
+id: analyze-and-test
+title: Analyze, then improve tests
+# resumeThread: <codex thread id>   # continue an existing Codex thread instead of a new one
+# handoff: previous                 # first prompt includes the previous session's worker reports
+
+missions:
+  - id: analyze
+    title: Analyze repository
+    prompt:
+      type: COLD_PROMPT
+      content: |
+        Analyze the repository architecture.
+        Identify technical debt and risks.
+        Do not modify source files.
+    completionCriteria:
+      - Produce a structured analysis
+    execution:
+      readOnly: true
+    # Read-only missions run no completion checks unless listed here,
+    # e.g. verification: [typecheck]. A listed check that fails blocks the mission.
+
+  - id: tests
+    title: Improve tests
+    prompt:
+      type: COLD_PROMPT
+      content: |
+        Improve test coverage.
+        Work incrementally and verify changes.
+    completionCriteria:
+      - Relevant tests pass
+    execution:
+      readOnly: false

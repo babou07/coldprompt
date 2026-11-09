@@ -1,0 +1,51 @@
+version: 1
+
+project:
+  name: coldprompt-example
+  workingDirectory: .
+
+worker:
+  provider: codex
+  model: null
+  # sandboxMode / approvalPolicy are inherited from your Codex config when unset.
+  # sandboxMode: workspace-write
+  # The SDK bundles its own (older) codex binary; point to yours so your
+  # ~/.codex config, models and threads are understood. See `coldprompt doctor`.
+  # codexPath: /home/you/.local/bin/codex
+
+supervisor:
+  provider: claude
+  model: null
+  # tools: [Read, Grep, Glob]       # supervisor tools (read-only by default)
+  # permissionMode: dontAsk
+  # timeoutSeconds: 900
+
+runtime:
+  maxTurns: 90
+  maxHours: 6
+  statusEvery: 3
+  retryDelaysSeconds: [30, 60, 120, 240]
+  verifyGitCleanOnCompletion: true
+  requireHumanApprovalForMissionTransition: false
+  # sessionLockRetryDelaysSeconds: [5, 15, 30, 60]
+
+# Deterministic checks. `completion` checks gate MISSION_COMPLETE;
+# `turn` checks run after every worker turn and are shown to the supervisor.
+verification:
+  commands: []
+  #  - name: typecheck
+  #    run: npm run typecheck
+  #  - name: tests
+  #    run: npm test
+  #    timeoutSeconds: 1200
+  plugins: []
+  #  - name: domain
+  #    module: ./verify/domain.mjs   # exports createVerifier(options)
+  #    options: {}
+
+# Sessions, executed one after another. A session file is ONE Codex thread:
+# its missions (COLD_PROMPTs) run consecutively in the same worker context.
+# Each new session starts a new thread (unless it sets resumeThread), and
+# moving from one session to the next always waits for "approve mission".
+sessions:
+  - examples/analyze-and-test.session.yaml
