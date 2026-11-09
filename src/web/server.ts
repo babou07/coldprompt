@@ -37,6 +37,11 @@ export interface WebServerOptions {
   startRun?: () => Promise<{ ok: boolean; message: string }>;
   /** Proposed sessions the user can accept into the plan or dismiss. */
   proposals?: ProposalOptions;
+  /** Archives the finished plan while the orchestrator is stopped (see src/archive.ts). */
+  archive?: {
+    check: () => Promise<{ archivable: boolean; reason?: string }>;
+    run: () => Promise<{ ok: true; directory: string } | { ok: false; error: string }>;
+  };
   log?: (message: string) => void;
   /** Reconnect delay to the orchestrator socket. */
   reconnectMs?: number;
@@ -217,6 +222,7 @@ export class WebServer {
       return this.json(res, result.ok ? 200 : 500, { ok: result.ok, data: { message: result.message }, error: result.ok ? undefined : result.message });
     }
     if (path.startsWith('/api/proposals')) return this.proposalsApi(req, res, path);
+    if (path === '/api/archive') return this.archiveApi(req, res);
     const turn = /^\/api\/turn\/([^/]+)$/.exec(path);
     if (req.method === 'GET' && turn) {
       const id = decodeURIComponent(turn[1]);
@@ -244,6 +250,27 @@ export class WebServer {
       });
     }
     return this.json(res, 404, { ok: false, error: 'Not found' });
+  }
+
+  // -------------------------------------------------------------------------
+  // Plan archive
+
+  private async archiveApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const a = this.options.archive;
+    if (!a) return this.json(res, 501, { ok: false, error: 'Archiving is not configured' });
+    if (req.method === 'GET') {
+      if (this.connected) return this.json(res, 200, { ok: true, data: { archivable: false, reason: 'ColdPrompt is running' } });
+      return this.json(res, 200, { ok: true, data: await a.check() });
+    }
+    if (req.method !== 'POST') return this.json(res, 404, { ok: false, error: 'Not found' });
+    if (!(await this.body(req, res))) return;
+    if (this.connected || this.starting) return this.json(res, 409, { ok: false, error: 'ColdPrompt is running' });
+    const result = await a.run();
+    if (!result.ok) return this.json(res, 409, { ok: false, error: result.error });
+    this.status = undefined;
+    this.options.log?.(`web: plan archived to ${result.directory}`);
+    this.broadcast('archived', { directory: result.directory });
+    return this.json(res, 200, { ok: true, data: { message: `Plan archived to ${result.directory}`, directory: result.directory } });
   }
 
   // -------------------------------------------------------------------------
@@ -348,7 +375,7 @@ export class WebServer {
     res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no', Connection: 'keep-alive' });
     const events = await this.options.store.readEvents().catch(() => []);
     const history = events.slice(-HISTORY_EVENTS).map((e) => ({ type: e.type, data: e.data, at: e.timestamp }));
-    this.write(res, 'hello', { project: this.options.projectName, connected: this.connected, canStart: Boolean(this.options.startRun), proposals: Boolean(this.options.proposals), status: this.status ?? null, history });
+    this.write(res, 'hello', { project: this.options.projectName, connected: this.connected, canStart: Boolean(this.options.startRun), canArchive: Boolean(this.options.archive), proposals: Boolean(this.options.proposals), status: this.status ?? null, history });
     this.streams.add(res);
     res.on('close', () => this.streams.delete(res));
   }

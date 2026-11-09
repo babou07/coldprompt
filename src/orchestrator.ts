@@ -1,3 +1,4 @@
+import { archiveRun, notFinishedReason, snapshotPlan } from './archive.js';
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { classifyError, errorMessage, ColdPromptError, redact, redactValue, type ErrorKind } from './errors.js';
@@ -167,13 +168,18 @@ export class Orchestrator {
     await this.store.acquireLock();
     try {
       this.state = await this.store.load();
-      this.checkConfigMatchesState();
+      const problems = this.configMismatch();
+      if (problems.length) await this.archiveReplacedPlan(problems);
       this.checkProvidersMatchState();
       await this.adoptLegacyThread();
       if (this.state.supervisorSessionId) {
         await this.options.supervisor.resumeSession(this.state.supervisorSessionId, this.state.supervisorSessionStarted);
       }
       await this.recover();
+      if (this.options.configPath) {
+        // Kept with the run so its archive shows the plan as it ran; informational only.
+        await snapshotPlan(this.store, this.options.configPath, this.config).catch((error) => this.log(`plan snapshot not written: ${errorMessage(error)}`));
+      }
       if (this.state.status === 'BLOCKED' && this.state.blocked?.kind === 'PROVIDER_CHECK') {
         // The check runs again on this start, with the configuration as it is now.
         await this.mutate((s) => { s.status = 'RUNNING'; s.blocked = undefined; s.blockedReason = undefined; });
@@ -220,8 +226,29 @@ export class Orchestrator {
     }
   }
 
-  /** Refuses to continue when the mission list changed under persisted progress. */
-  private checkConfigMatchesState(): void {
+  /**
+   * The mission list changed under persisted progress. A finished plan that
+   * the configuration replaced (none of its missions left) is archived and
+   * the new plan starts from a fresh state; anything else is refused.
+   */
+  private async archiveReplacedPlan(problems: string[]): Promise<void> {
+    const unfinished = notFinishedReason(this.state);
+    const replaced = !this.config.missions.some((m) => this.state.missions[m.id]);
+    if (unfinished || !replaced) {
+      const hint = unfinished
+        ? `The previous plan is not finished (${unfinished}), so it is not archived automatically. Restore the previous mission order, or archive it anyway with "coldprompt archive --force".`
+        : 'The plan still contains missions of the previous run, so it is not archived automatically. Restore the previous mission order, or archive the previous plan first ("coldprompt archive", or Archive plan in the web console) to run this list as a new plan.';
+      throw new ColdPromptError('INVALID_CONFIG', `The mission list no longer matches the persisted state (${this.store.statePath}):\n  - ${problems.join('\n  - ')}\n${hint}`);
+    }
+    const directory = await archiveRun(this.store, { reason: 'auto', configPath: this.options.configPath, config: this.config });
+    this.state = initialState();
+    await this.store.save(this.state);
+    this.log(`previous plan finished and replaced in the configuration: archived to ${directory}`);
+    await this.emit('plan.archived', { directory, reason: 'auto', problems });
+  }
+
+  /** Differences between the mission list and the persisted progress (empty: they match). */
+  private configMismatch(): string[] {
     const s = this.state;
     const ids = this.config.missions.map((m) => m.id);
     const problems: string[] = [];
@@ -236,10 +263,9 @@ export class Orchestrator {
       if (progress.status === 'COMPLETED' && ids.indexOf(id) >= s.missionIndex) problems.push(`completed mission "${id}" is now at or after the current index`);
       const now = this.config.missions.find((m) => m.id === id)?.session;
       if (progress.session && now && progress.session !== now) problems.push(`mission "${id}" moved from session "${progress.session}" to "${now}"`);
+      if (progress.status === 'COMPLETED' && !ids.includes(id)) problems.push(`completed mission "${id}" is no longer in the plan`);
     }
-    if (problems.length) {
-      throw new ColdPromptError('INVALID_CONFIG', `The mission list no longer matches the persisted state (${this.store.statePath}):\n  - ${problems.join('\n  - ')}\nRestore the previous mission order, or use a new COLDPROMPT_HOME.`);
-    }
+    return problems;
   }
 
   async run(): Promise<State> {
@@ -250,6 +276,7 @@ export class Orchestrator {
     try {
       await this.mutate((s) => {
         s.runStartedAt = new Date(this.runStart).toISOString();
+        s.finalizeConfigured = Boolean(this.config.finalize);
         if (s.status === 'IDLE' || s.status === 'STOPPED') s.status = 'RUNNING';
         // Missions appended to the config after a completed run.
         if (s.status === 'COMPLETED' && s.missionIndex < this.config.missions.length) s.status = 'RUNNING';

@@ -174,6 +174,15 @@ even an interrupted first turn keeps its thread.
   last mission id) makes it idempotent across restarts. Proposals are plain
   session files moved into a directory the plan globs, so accepting one is
   just a file move validated against existing ids.
+- **Plan archives.** A state directory holds one plan's run. Archiving
+  moves the run files into `archive/<name>/` under the store lock, so it
+  is refused while the orchestrator runs. Automatic archiving at start is
+  limited to a finished plan that the configuration fully replaced: a
+  reordered or partly kept list would otherwise re-run completed work, so
+  it is refused (and a completed mission missing from the plan is now a
+  mismatch; before, a new list of equal length silently resumed at the old
+  index). Each run start snapshots the plan files (`plan/`) so the archive
+  shows the plan as it ran.
 
 ## Open risks / not done
 

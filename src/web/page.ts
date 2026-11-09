@@ -27,6 +27,7 @@ export const PAGE_HTML = `<!doctype html>
       <button data-cmd="stop" class="link danger" title="Stop gracefully after the current turn">Stop after this turn</button><span class="sep">|</span></span>
       <button id="logout" class="link" title="Forget the access token on this device">Forget token</button>
       <span id="start-actions" class="group" hidden><span class="sep">|</span><button id="start-run" class="link" title="Start the run (it reloads the YAML files)">Start run</button></span>
+      <span id="archive-actions" class="group" hidden><span class="sep">|</span><button id="archive-plan" class="link" title="Move this finished plan to .coldprompt/archive/ so the next plan starts fresh">Archive plan</button></span>
     </div>
     <div id="plan" class="plan" aria-label="progress"></div>
     <button id="plan-approve" class="primary" disabled>Nothing to approve</button>
@@ -197,6 +198,7 @@ let mode = 'ask';
 let status = null;
 let connected = false;
 let canStart = false;
+let canArchive = false;
 let proposalsEnabled = false;
 let follow = true;
 let streamAbort = null;
@@ -286,12 +288,14 @@ function handle(name, data) {
     for (const e of data.history) renderEvent(e);
     follow = keepFollow; scrollEnd(true);
     canStart = data.canStart === true;
+    canArchive = data.canArchive === true;
     proposalsEnabled = data.proposals === true;
     if (proposalsEnabled) loadProposals();
     setConn(data.connected);
     if (data.status) renderStatus(data.status);
   } else if (name === 'status') renderStatus(data);
   else if (name === 'connection') setConn(data.connected);
+  else if (name === 'archived') location.reload();
   else if (name === 'event') { renderEvent(data); scrollEnd(); }
 }
 
@@ -305,6 +309,17 @@ function setConn(value, webDown) {
   $('#offline-hint').hidden = !canStart;
   if (value) $('#start-msg').hidden = true;
   if (!value) { $('#badge').textContent = webDown ? 'offline' : 'stopped'; $('#badge').className = 'badge'; }
+  refreshArchive(value || webDown);
+}
+
+/** "Archive plan" is shown only while stopped, for a finished plan. */
+async function refreshArchive(hide) {
+  const group = $('#archive-actions');
+  if (hide || !canArchive) { group.hidden = true; return; }
+  try {
+    const r = await api('/api/archive');
+    group.hidden = !(r.ok && r.data.archivable && !connected);
+  } catch { group.hidden = true; }
 }
 
 // ---------------------------------------------------------------- plan
@@ -696,6 +711,17 @@ document.addEventListener('DOMContentLoaded', () => {
       else { $('#start-msg').textContent = r.error; $('#start-msg').hidden = false; toast('Start failed', true); }
     } catch (e) { toast(e.message, true); }
     finally { b.disabled = false; b.textContent = 'Start run'; }
+  };
+  $('#archive-plan').onclick = async () => {
+    if (!confirm('Archive the finished plan? Its state, events, turns and outputs move to .coldprompt/archive/; the next Start run begins a new plan with the YAML files as they are then.')) return;
+    const b = $('#archive-plan');
+    b.disabled = true;
+    try {
+      const r = await api('/api/archive', {});
+      if (r.ok) { toast(r.data.message); setTimeout(() => location.reload(), 800); }
+      else toast(r.error, true);
+    } catch (e) { toast(e.message, true); }
+    finally { b.disabled = false; }
   };
   $('#login-form').onsubmit = (ev) => {
     ev.preventDefault();

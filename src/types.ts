@@ -483,6 +483,8 @@ export interface State {
   directives: Directive[];
   lastGit?: GitSnapshot;
   finalize?: FinalizeProgress;
+  /** The plan had a finalize step at its last run start (archiving waits for it). */
+  finalizeConfigured?: boolean;
   retry?: ErrorInfo;
   lastError?: ErrorInfo;
   createdAt: string;

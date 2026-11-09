@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { loadConfig, resolveConfigPath, resolveWorkingDirectory } from './config.js';
 import { Store } from './store.js';
+import { archiveCheck, archivePlan } from './archive.js';
 import { Orchestrator, HELP_TEXT } from './orchestrator.js';
 import { snapshot } from './git.js';
 import { buildVerifiers, configDirectoryOf, readOnlyCompletionChecks } from './verification.js';
@@ -34,6 +35,9 @@ const USAGE = `Usage: coldprompt <command>
                       Web console (status, live worker activity, HOT_PROMPTs);
                       default 127.0.0.1:8787, token in <COLDPROMPT_HOME>/web-token
   systemd [--write]   Print (or write to ~/.config/systemd/user) units for run and web
+  archive [--force]   Move the finished run (state, events, turns, outputs, plan
+                      snapshot) to <COLDPROMPT_HOME>/archive/ so the next plan starts
+                      fresh; --force also archives an unfinished run
 
 Environment: COLDPROMPT_CONFIG (coldprompt.yaml), COLDPROMPT_HOME (.coldprompt next to the config).
 A session file (listed under "sessions:" in coldprompt.yaml) is one worker thread
@@ -229,7 +233,11 @@ async function web(): Promise<number> {
   const token = await loadOrCreateToken(store);
   const server = new WebServer({
     store, socketPath: store.socketPath, host, port, token, projectName, log, proposals,
-    startRun: runUnit ? () => startUnit(runUnit, { exec: (file, args) => exec(file, args), redact }) : undefined
+    startRun: runUnit ? () => startUnit(runUnit, { exec: (file, args) => exec(file, args), redact }) : undefined,
+    archive: {
+      check: async () => archiveCheck(store, await loadConfig(configPath).catch(() => undefined)),
+      run: async () => archivePlan(store, { configPath, config: await loadConfig(configPath).catch(() => undefined) })
+    }
   });
   await server.start();
   const loopback = host === '127.0.0.1' || host === '::1' || host === 'localhost';
@@ -321,6 +329,13 @@ async function main(): Promise<number> {
       return web();
     case 'systemd':
       return systemdUnits();
+    case 'archive': {
+      const config = await loadConfig(configPath).catch(() => undefined);
+      const result = await archivePlan(store, { configPath, config, force: args.includes('--force') });
+      if (!result.ok) { console.error(result.error); return 1; }
+      console.log(`archived to ${result.directory}`);
+      return 0;
+    }
     case 'events': {
       const n = Number(args[1] ?? 20);
       for (const e of (await store.readEvents()).slice(-n)) console.log(`${e.timestamp} ${e.type} ${JSON.stringify(e.data)}`);

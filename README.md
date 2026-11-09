@@ -150,6 +150,30 @@ lists the sessions, their missions and which thread each will use.
   *Accept* moves one into `acceptInto` (refused on a session or mission id clash),
   *Dismiss* moves it to `dismissed/`. Accepted sessions run at the next *Start run*.
 
+### Starting a new plan: archives
+
+A run's state (`state.json`, `events.jsonl`, `turns/`, `outputs/`) belongs to
+one plan. To start another plan, edit `coldprompt.yaml` and the session files,
+then:
+
+- **Just press Start run.** If the previous plan is finished (COMPLETED,
+  finalize done when it has one) and the new configuration keeps none of its
+  missions, the run archives it and starts the new plan from its first mission
+  (event `plan.archived`).
+- Otherwise the run refuses to start: an unfinished plan, or a list that still
+  contains missions of the previous run (reordered, partly kept), would
+  silently resume at the wrong mission. Restore the list, or archive first.
+- **Archive plan** in the web panel (shown while the run is stopped and the
+  plan is finished), or `coldprompt archive`, archives the plan without
+  starting anything. `coldprompt archive --force` also archives an unfinished
+  run.
+
+An archive is `<COLDPROMPT_HOME>/archive/<date>-<first>--<last session>/`:
+the run files, a copy of `coldprompt.yaml` and of the session files as they
+ran (`plan/`, snapshotted at each run start), and `archive.json` (when, why,
+status, missions, finalize result). The web token stays. Appending missions to
+a finished plan still continues it, without archiving.
+
 ### Providers
 
 `worker:` and `supervisor:` each pick a `provider:`. Codex and Claude Code
@@ -270,7 +294,8 @@ the console socket, like `coldprompt console`.
   confirmation, so the run reloads the YAML files; one start at a time. If
   the run ends within seconds (invalid config, refused state), the page shows
   the journal lines of that start, secrets masked. While the run is stopped,
-  the panel shows its last known state.
+  the panel shows its last known state, and **Archive plan** when the plan is
+  finished (see "Starting a new plan").
 - Phone over Tailscale: keep the default localhost bind and run
   `tailscale serve --bg 8787`, then open `https://<host>.<tailnet>.ts.net`.
   Do not bind to `0.0.0.0`.
