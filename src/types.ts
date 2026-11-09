@@ -436,6 +436,8 @@ export interface FinalizeProgress {
 }
 
 export const finalizeResultSchema = z.object({
+  /** False when any instruction failed or was refused: recorded as FAILED, retried at the next run. */
+  ok: z.boolean(),
   /** What was done, for the human (shown in the console). */
   summary: z.string(),
   /** Files written, absolute or relative to coldprompt.yaml. */

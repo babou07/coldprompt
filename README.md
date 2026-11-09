@@ -134,7 +134,7 @@ lists the sessions, their missions and which thread each will use.
       provider: claude
       finalize:                     # extra permissions for the finalize call only
         tools: [Write]
-        allowedTools: ["Write(//home/me/workspace/sessions/proposed/**)"]
+        allowedTools: ["Edit(//home/me/workspace/sessions/proposed/**)"]  # Edit rules also cover Write
         addDirs: [sessions]         # relative to coldprompt.yaml, or ~/
         timeoutSeconds: 1800
 
@@ -143,8 +143,10 @@ lists the sessions, their missions and which thread each will use.
   in `outputs/<mission>.json` (state directory); the mission cannot complete without a
   valid block. It is data for a later step, not a decision: the supervisor still reviews.
 - **Finalize.** Runs once per completed plan (again only if missions were appended
-  later). Its answer is `{ summary, files }`, shown in the console. A failure is
-  recorded and retried at the next run. Only the Claude supervisor supports it;
+  later). Its answer is `{ ok, summary, files }`, shown in the console. A failure
+  (an error, or `ok: false` when the supervisor reports that something failed or
+  was refused) is recorded and retried at the next run. File permission rules are
+  `Edit(...)` rules, which also cover the Write tool; `Write(...)` rules match nothing. Only the Claude supervisor supports it;
   reviews stay read-only.
 - **Proposals.** The web console lists the session files in `proposals.directory`;
   *Accept* moves one into `acceptInto` (refused on a session or mission id clash),

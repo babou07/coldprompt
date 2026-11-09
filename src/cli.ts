@@ -154,7 +154,7 @@ async function run(dryRun: boolean): Promise<number> {
     const supervisor = new FakeSupervisorAdapter([], [], { decision: 'MISSION_COMPLETE', reason: 'dry-run', workerInstruction: '' });
     supervisor.finalize = async (request) => {
       log(`[dry-run] supervisor finalize prompt:\n${buildFinalizePrompt(request, config.runtime.maxWorkerOutputChars)}\n`);
-      return { summary: 'dry-run: finalize not executed', files: [] };
+      return { ok: true, summary: 'dry-run: finalize not executed', files: [] };
     };
     orchestrator = new Orchestrator({
       config: { ...config, runtime: { ...config.runtime, verifyGitCleanOnCompletion: false, autoApproveMissions: true } },

@@ -107,10 +107,11 @@ export interface SupervisorAdapter {
 export const FINALIZE_JSON_SCHEMA = {
   type: 'object',
   properties: {
+    ok: { type: 'boolean' },
     summary: { type: 'string' },
     files: { type: 'array', items: { type: 'string' } }
   },
-  required: ['summary', 'files'],
+  required: ['ok', 'summary', 'files'],
   additionalProperties: false
 } as const;
 
@@ -228,6 +229,6 @@ export function buildFinalizePrompt(req: FinalizeRequest, maxOutputChars: number
     '## Instructions from the user',
     req.prompt.trim(),
     '',
-    'When done, return JSON: summary = what you did and its outcome (say plainly what failed), files = every file you wrote.'
+    'When done, return JSON: ok = true only if every instruction above succeeded (false if anything failed or was refused), summary = what you did and its outcome (say plainly what failed), files = every file you wrote.'
   ].join('\n');
 }

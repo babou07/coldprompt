@@ -953,6 +953,13 @@ export class Orchestrator {
     await this.emit('plan.finalize_started', { afterMission: last, inputs: finalize.inputs });
     try {
       const result = await this.supervisorCall('finalize', (signal) => supervisor.finalize!(request, { signal }));
+      if (!result.ok) {
+        // The supervisor answered but reports a failure (e.g. a refused permission): retry at the next run.
+        await record({ status: 'FAILED', error: result.summary, summary: result.summary, files: result.files });
+        await this.emit('plan.finalize_failed', { error: result.summary, files: result.files });
+        this.log(`finalize failed (reported by the supervisor): ${result.summary}`);
+        return;
+      }
       await record({ status: 'DONE', summary: result.summary, files: result.files });
       await this.emit('plan.finalized', { summary: result.summary, files: result.files });
       this.log(`finalize done: ${result.summary}`);

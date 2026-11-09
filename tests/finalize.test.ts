@@ -97,9 +97,17 @@ test('finalize: once per completed plan, gets outputs and reports, failures retr
     assert.equal(state.finalize.status, 'FAILED');
     assert.match(state.finalize.error, /mail server down/);
 
+    // 1b. The supervisor answers but reports a failure (e.g. a refused permission): FAILED too.
+    supervisor = new FakeSupervisorAdapter();
+    supervisor.finalize = async () => ({ ok: false, summary: 'Write denied: summary not written, mail not sent', files: [] });
+    h = await start(home.path, work.path, config, new FakeWorkerAdapter(), supervisor);
+    state = await h.done as any;
+    assert.equal(state.finalize.status, 'FAILED');
+    assert.match(state.finalize.error, /Write denied/);
+
     // 2. The next run retries it (no worker turn), with the output and the last report.
     supervisor = new FakeSupervisorAdapter();
-    supervisor.finalize = async (request) => { requests.push(request); return { summary: '5 sessions proposed, mail sent', files: ['proposed/r005.yaml'] }; };
+    supervisor.finalize = async (request) => { requests.push(request); return { ok: true, summary: '5 sessions proposed, mail sent', files: ['proposed/r005.yaml'] }; };
     let worker = new FakeWorkerAdapter();
     h = await start(home.path, work.path, config, worker, supervisor);
     state = await h.done as any;
@@ -137,13 +145,13 @@ test('Claude finalize: extra permissions for that call only, structured answer',
   const runner = async (_cmd: string, args: string[]) => {
     calls.push(args);
     const schema = JSON.parse(args[args.indexOf('--json-schema') + 1]);
-    const out = schema.required.includes('summary') ? { summary: 'ok', files: ['a.yaml'] } : { decision: 'CONTINUE', reason: 'r', workerInstruction: 'w', evidence: [] };
+    const out = schema.required.includes('summary') ? { ok: true, summary: 'ok', files: ['a.yaml'] } : { decision: 'CONTINUE', reason: 'r', workerInstruction: 'w', evidence: [] };
     return { code: 0, stdout: JSON.stringify({ type: 'result', subtype: 'success', session_id: 's1', structured_output: out }), stderr: '' };
   };
   const config = claudeSupervisor({ finalize: { tools: ['Write', 'Bash', 'Skill'], allowedTools: ['Edit(//p/**)', 'Bash(/s/send.py:*)'], addDirs: ['ignored-here'] } });
   const adapter = new ClaudeSupervisorAdapter(config, '/repo', runner, 1000, ['/abs/proposed', '/abs/skill']);
   const result = await adapter.finalize({ prompt: 'p', project: 't', configDirectory: '/cfg', plan: [], inputs: [] });
-  assert.deepEqual(result, { summary: 'ok', files: ['a.yaml'] });
+  assert.deepEqual(result, { ok: true, summary: 'ok', files: ['a.yaml'] });
   const args = calls[0];
   assert.equal(args[args.indexOf('--tools') + 1], 'Read,Grep,Glob,Write,Bash,Skill');
   assert.deepEqual(args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--allowedTools') + 3), ['Edit(//p/**)', 'Bash(/s/send.py:*)']);
