@@ -17,7 +17,7 @@ import { formatStatus, runInteractiveConsole, sendOnce } from './console/client.
 import { parseCommandLine } from './console/protocol.js';
 import type { Config } from './types.js';
 import { WebServer, loadOrCreateToken } from './web/server.js';
-import { findOnPath, renderUnits } from './web/systemd.js';
+import { findOnPath, renderUnits, startUnit } from './web/systemd.js';
 
 const exec = promisify(execFile);
 
@@ -204,14 +204,7 @@ async function web(): Promise<number> {
   const token = await loadOrCreateToken(store);
   const server = new WebServer({
     store, socketPath: store.socketPath, host, port, token, projectName, log,
-    startRun: runUnit ? async () => {
-      try {
-        await exec('systemctl', ['--user', 'start', runUnit]);
-        return { ok: true, message: `Started ${runUnit}` };
-      } catch (error) {
-        return { ok: false, message: `systemctl --user start ${runUnit} failed: ${redact(errorMessage(error))}` };
-      }
-    } : undefined
+    startRun: runUnit ? () => startUnit(runUnit, { exec: (file, args) => exec(file, args), redact }) : undefined
   });
   await server.start();
   const loopback = host === '127.0.0.1' || host === '::1' || host === 'localhost';

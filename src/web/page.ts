@@ -23,9 +23,10 @@ export const PAGE_HTML = `<!doctype html>
   <div id="mission" class="muted small"></div>
   <div id="menu" class="menu">
     <div class="actions">
-      <button data-cmd="pause" class="link" title="Pause at the next safe boundary">Pause</button><span class="sep">|</span>
-      <button data-cmd="stop" class="link danger" title="Stop gracefully after the current turn">Stop after this turn</button><span class="sep">|</span>
+      <span id="run-actions" class="group"><button data-cmd="pause" class="link" title="Pause at the next safe boundary">Pause</button><span class="sep">|</span>
+      <button data-cmd="stop" class="link danger" title="Stop gracefully after the current turn">Stop after this turn</button><span class="sep">|</span></span>
       <button id="logout" class="link" title="Forget the access token on this device">Forget token</button>
+      <span id="start-actions" class="group" hidden><span class="sep">|</span><button id="start-run" class="link" title="Start the run (it reloads the YAML files)">Start run</button></span>
     </div>
     <div id="plan" class="plan" aria-label="progress"></div>
     <button id="plan-approve" class="primary" disabled>Nothing to approve</button>
@@ -40,7 +41,8 @@ export const PAGE_HTML = `<!doctype html>
 
 <section id="offline" class="card warn" hidden>
   <strong>ColdPrompt is not running.</strong>
-  <div class="row"><button id="start-run">Start run</button><span id="start-msg" class="muted small"></span></div>
+  <div id="offline-hint" class="muted small">The panel shows the last known state. <b>Start run</b> in the panel reloads the YAML files.</div>
+  <pre id="start-msg" class="small" hidden></pre>
 </section>
 
 <section id="directives" class="card" hidden></section>
@@ -113,6 +115,8 @@ pre{background:var(--code);border-radius:8px;padding:8px 10px;overflow:auto;whit
 .menu{display:flex;flex-direction:column;gap:8px;margin-top:8px}
 .actions{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;padding-bottom:8px;border-bottom:1px solid var(--line)}
 .sep{color:var(--muted)}
+.actions .group{display:contents}
+#start-msg{white-space:pre-wrap;word-break:break-word;margin:6px 0 0;max-height:40vh;overflow:auto}
 button.link.danger{color:var(--bad)}
 .plan{max-height:min(30vh,220px);overflow-y:auto;overscroll-behavior:contain;font-size:13px;padding-right:4px}
 .plan label{display:flex;gap:7px;align-items:baseline;padding:2px 0}
@@ -180,6 +184,7 @@ if (location.hash) history.replaceState(null, '', location.pathname);
 let mode = 'ask';
 let status = null;
 let connected = false;
+let canStart = false;
 let follow = true;
 let streamAbort = null;
 const turns = new Map();     // turnId -> { card, body, items: Map, plan }
@@ -267,6 +272,7 @@ function handle(name, data) {
     const keepFollow = follow; follow = false;
     for (const e of data.history) renderEvent(e);
     follow = keepFollow; scrollEnd(true);
+    canStart = data.canStart === true;
     setConn(data.connected);
     if (data.status) renderStatus(data.status);
   } else if (name === 'status') renderStatus(data);
@@ -279,6 +285,10 @@ function setConn(value, webDown) {
   $('#conn').className = 'dot' + (value ? ' on' : '');
   $('#conn').title = value ? 'connected' : webDown ? 'web console unreachable' : 'ColdPrompt not running';
   $('#offline').hidden = value || webDown;
+  $('#run-actions').hidden = !value;
+  $('#start-actions').hidden = value || webDown || !canStart;
+  $('#offline-hint').hidden = !canStart;
+  if (value) $('#start-msg').hidden = true;
   if (!value) { $('#badge').textContent = webDown ? 'offline' : 'stopped'; $('#badge').className = 'badge'; }
 }
 
@@ -593,11 +603,16 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#logout').onclick = () => logout();
   $('#report-close').onclick = () => $('#report').close();
   $('#start-run').onclick = async () => {
-    if (!confirm('Start the ColdPrompt run?')) return;
+    if (!confirm('Start the ColdPrompt run of ' + ($('#project').textContent || 'this project') + '? It reloads the YAML files.')) return;
+    const b = $('#start-run');
+    b.disabled = true; b.textContent = 'Starting…';
+    $('#start-msg').hidden = true;
     try {
       const r = await api('/api/start', {});
-      $('#start-msg').textContent = r.ok ? r.data.message : r.error;
-    } catch (e) { $('#start-msg').textContent = e.message; }
+      if (r.ok) toast(r.data.message);
+      else { $('#start-msg').textContent = r.error; $('#start-msg').hidden = false; toast('Start failed', true); }
+    } catch (e) { toast(e.message, true); }
+    finally { b.disabled = false; b.textContent = 'Start run'; }
   };
   $('#login-form').onsubmit = (ev) => {
     ev.preventDefault();

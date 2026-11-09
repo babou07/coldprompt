@@ -77,3 +77,50 @@ export async function findOnPath(name: string, pathValue = process.env.PATH ?? '
   }
   return undefined;
 }
+
+export type Exec = (file: string, args: string[]) => Promise<{ stdout: string }>;
+
+export interface StartUnitOptions {
+  exec: Exec;
+  /** How long to watch the unit after the start: a broken config exits within seconds. */
+  watchMs?: number;
+  pollMs?: number;
+  /** Turns a message into one safe to show (secrets masked). */
+  redact?: (text: string) => string;
+}
+
+/**
+ * `systemctl --user start <unit>`, then watches it briefly: when the run ends
+ * right away (invalid config, refused state), the reason comes from the last
+ * journal lines of that start instead of a misleading "started".
+ */
+export async function startUnit(unit: string, options: StartUnitOptions): Promise<{ ok: boolean; message: string }> {
+  const clean = options.redact ?? ((text: string) => text);
+  const run = async (args: string[]): Promise<string> => {
+    try { return (await options.exec('systemctl', ['--user', ...args])).stdout.trim(); } catch (error) {
+      return String((error as { stdout?: string }).stdout ?? '').trim();
+    }
+  };
+  try {
+    await options.exec('systemctl', ['--user', 'start', unit]);
+  } catch (error) {
+    const err = error as { stderr?: string; message?: string };
+    return { ok: false, message: clean(`systemctl --user start ${unit} failed: ${(err.stderr || err.message || '').trim()}`) };
+  }
+  const deadline = Date.now() + (options.watchMs ?? 8000);
+  while (Date.now() < deadline) {
+    const state = await run(['is-active', unit]);
+    if (state !== 'active' && state !== 'activating') {
+      const invocation = await run(['show', '-p', 'InvocationID', '--value', unit]);
+      let lines = '';
+      try {
+        const args = ['--user', '-u', unit, '-n', '12', '--no-pager', '-o', 'cat'];
+        if (invocation) args.push(`_SYSTEMD_INVOCATION_ID=${invocation}`);
+        lines = (await options.exec('journalctl', args)).stdout.trim();
+      } catch { /* journal unavailable */ }
+      return { ok: false, message: clean(`${unit} ended right after starting (${state || 'unknown'})${lines ? ':\n' + lines : ''}`) };
+    }
+    await new Promise((r) => setTimeout(r, options.pollMs ?? 500));
+  }
+  return { ok: true, message: `Started ${unit}` };
+}

@@ -56,7 +56,7 @@ From a clone, with Node.js 22+ and the CLIs of your chosen providers
     tailscale serve --bg 8787       # if refused: sudo tailscale set --operator=$USER
 
 Then open `http://127.0.0.1:8787` (or `https://<host>.<tailnet>.ts.net` on
-the phone) and press **Start run**, or run `systemctl --user start coldprompt-run`.
+the phone) and press **Start run** in the ⋯ panel, or run `systemctl --user start coldprompt-run`.
 Nothing runs against your repository until you do.
 
 ## Development
@@ -231,6 +231,14 @@ the console socket, like `coldprompt console`.
   paste the token in the page. It is sent as a Bearer header, never a
   cookie; the token stays in the browser's local storage until
   "Forget token".
+- Header panel (⋯): `Pause | Stop after this turn | Forget token` while
+  the run is up; when it is stopped, `Pause` and `Stop` give way to
+  **Start run** (only when the web console was started with `--run-unit`,
+  as the systemd unit does). It runs `systemctl --user start <unit>` after a
+  confirmation, so the run reloads the YAML files; one start at a time. If
+  the run ends within seconds (invalid config, refused state), the page shows
+  the journal lines of that start, secrets masked. While the run is stopped,
+  the panel shows its last known state.
 - Phone over Tailscale: keep the default localhost bind and run
   `tailscale serve --bg 8787`, then open `https://<host>.<tailnet>.ts.net`.
   Do not bind to `0.0.0.0`.

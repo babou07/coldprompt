@@ -4,15 +4,15 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ConsoleServer } from '../src/console/server.js';
 import { WebServer, loadOrCreateToken } from '../src/web/server.js';
-import { renderUnits } from '../src/web/systemd.js';
+import { renderUnits, startUnit } from '../src/web/systemd.js';
 import { describeItem } from '../src/adapters/codex.js';
 import { Store } from '../src/store.js';
 import { deferred, FakeSupervisorAdapter, FakeWorkerAdapter, makeConfig, start, tempDir, waitFor } from './helpers.js';
 
 const TOKEN = 't'.repeat(43);
 
-async function startWeb(store: Store) {
-  const web = new WebServer({ store, socketPath: store.socketPath, host: '127.0.0.1', port: 0, token: TOKEN, projectName: 'test', reconnectMs: 20 });
+async function startWeb(store: Store, startRun?: () => Promise<{ ok: boolean; message: string }>) {
+  const web = new WebServer({ store, socketPath: store.socketPath, host: '127.0.0.1', port: 0, token: TOKEN, projectName: 'test', reconnectMs: 20, startRun });
   await web.start();
   const base = `http://127.0.0.1:${web.address!.port}`;
   const call = (path: string, init: RequestInit = {}, token: string | null = TOKEN) =>
@@ -205,4 +205,75 @@ test('systemd units: graceful stop, no restart, web always on', () => {
   assert.match(web, /ExecStart=\/home\/u\/coldprompt\/bin\/coldprompt web --host 127.0.0.1 --port 8787 --run-unit coldprompt-run.service/);
   assert.match(web, /WantedBy=default.target/);
   assert.doesNotMatch(run, /\[Install\]/, 'the run is started on purpose, never at login');
+});
+
+test('web console: Start run only when stopped, one start at a time, failures reported', async () => {
+  const home = await tempDir();
+  try {
+    const store = new Store(home.path);
+    const gate = deferred<void>();
+    let calls = 0;
+    const { web, call, post } = await startWeb(store, async () => {
+      calls += 1;
+      await gate.promise;
+      return calls === 1 ? { ok: true, message: 'Started coldprompt-run.service' } : { ok: false, message: 'coldprompt-run.service ended right after starting (failed):\nInvalid config' };
+    });
+    try {
+      const hello = (await readEvents(await call('/api/stream'), (e) => e.length > 0))[0];
+      assert.equal(hello.data.canStart, true);
+      assert.equal(hello.data.connected, false);
+      assert.equal((await post('/api/start', {}, null)).status, 401);
+      const first = post('/api/start', {});
+      await waitFor(() => calls === 1);
+      assert.equal((await post('/api/start', {})).status, 409, 'a second click while starting is refused');
+      gate.resolve();
+      assert.deepEqual(await (await first).json(), { ok: true, data: { message: 'Started coldprompt-run.service' } });
+      const failed = await post('/api/start', {});
+      assert.equal(failed.status, 500);
+      assert.match((await failed.json()).error, /Invalid config/);
+    } finally {
+      await web.stop();
+    }
+    // Without a run unit, the page gets canStart false and the API says so.
+    const plain = await startWeb(store);
+    try {
+      assert.equal((await readEvents(await plain.call('/api/stream'), (e) => e.length > 0))[0].data.canStart, false);
+      assert.equal((await plain.post('/api/start', {})).status, 501);
+    } finally {
+      await plain.web.stop();
+    }
+  } finally {
+    await home.cleanup();
+  }
+});
+
+test('startUnit: started, ended right away (journal of that start, redacted), systemctl refused', async () => {
+  const fake = (states: string[], options: { startError?: Error } = {}) => {
+    const seen: string[][] = [];
+    const exec = async (file: string, args: string[]) => {
+      seen.push([file, ...args]);
+      if (args[1] === 'start' && options.startError) throw options.startError;
+      if (args[1] === 'is-active') {
+        const state = states.shift() ?? 'active';
+        if (state !== 'active') throw Object.assign(new Error('exit 3'), { stdout: state + '\n' });
+        return { stdout: 'active\n' };
+      }
+      if (args[1] === 'show') return { stdout: 'abc123\n' };
+      if (file === 'journalctl') return { stdout: 'Invalid config: token=SECRET\n' };
+      return { stdout: '' };
+    };
+    return { exec, seen };
+  };
+  const ok = fake(['activating', 'active']);
+  assert.deepEqual(await startUnit('run.service', { exec: ok.exec, watchMs: 30, pollMs: 5 }), { ok: true, message: 'Started run.service' });
+  assert.deepEqual(ok.seen[0], ['systemctl', '--user', 'start', 'run.service']);
+
+  const dead = fake(['failed']);
+  const result = await startUnit('run.service', { exec: dead.exec, watchMs: 1000, pollMs: 5, redact: (s) => s.replace('SECRET', '[redacted]') });
+  assert.equal(result.ok, false);
+  assert.match(result.message, /ended right after starting \(failed\):\nInvalid config: token=\[redacted\]/);
+  assert.ok(dead.seen.some((c) => c[0] === 'journalctl' && c.includes('_SYSTEMD_INVOCATION_ID=abc123')), 'only the journal of this start');
+
+  const refused = fake([], { startError: Object.assign(new Error('boom'), { stderr: 'Unit not found.' }) });
+  assert.deepEqual(await startUnit('run.service', { exec: refused.exec }), { ok: false, message: 'systemctl --user start run.service failed: Unit not found.' });
 });

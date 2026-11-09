@@ -63,6 +63,7 @@ export class WebServer {
   private status: unknown;
   private connected = false;
   private closing = false;
+  private starting = false;
   private statusTimer?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
   private readonly expected: Buffer;
@@ -195,7 +196,10 @@ export class WebServer {
       if (!(await this.body(req, res))) return;
       if (this.connected) return this.json(res, 409, { ok: false, error: 'ColdPrompt is already running' });
       if (!this.options.startRun) return this.json(res, 501, { ok: false, error: 'Starting the run is not configured (coldprompt web --run-unit)' });
-      const result = await this.options.startRun();
+      if (this.starting) return this.json(res, 409, { ok: false, error: 'A start is already in progress' });
+      this.starting = true;
+      let result: { ok: boolean; message: string };
+      try { result = await this.options.startRun(); } finally { this.starting = false; }
       return this.json(res, result.ok ? 200 : 500, { ok: result.ok, data: { message: result.message }, error: result.ok ? undefined : result.message });
     }
     const turn = /^\/api\/turn\/([^/]+)$/.exec(path);
@@ -263,7 +267,7 @@ export class WebServer {
     res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no', Connection: 'keep-alive' });
     const events = await this.options.store.readEvents().catch(() => []);
     const history = events.slice(-HISTORY_EVENTS).map((e) => ({ type: e.type, data: e.data, at: e.timestamp }));
-    this.write(res, 'hello', { project: this.options.projectName, connected: this.connected, status: this.status ?? null, history });
+    this.write(res, 'hello', { project: this.options.projectName, connected: this.connected, canStart: Boolean(this.options.startRun), status: this.status ?? null, history });
     this.streams.add(res);
     res.on('close', () => this.streams.delete(res));
   }
