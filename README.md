@@ -218,6 +218,37 @@ the console socket, like `coldprompt console`.
   `tailscale serve --bg 8787`, then open `https://<host>.<tailnet>.ts.net`.
   Do not bind to `0.0.0.0`.
 
+The four modes above the text box decide where your text goes when you
+press **Send**:
+
+| Mode | Goes to | Effect on the worker | Needs approval |
+|---|---|---|---|
+| **ask** | the supervisor only | none | no |
+| **tell --raw** | the worker | your exact text, at the next turn | no: sending it is the approval |
+| **tell** | the supervisor, then the worker | the directive the supervisor drafts, at the next turn | yes: **Approve** |
+| **resume** | the worker (and the orchestrator) | leaves the block; your text comes with the next turn | no: it is your decision |
+
+- **ask**: a question. The supervisor answers in the feed from what it
+  has followed so far; the worker is not interrupted and never sees it.
+  Usable at any time, even during a turn. *"Why did you accept although
+  DO08 is not routed?"*
+- **tell --raw**: your own instruction, delivered verbatim at the start
+  of the worker's next turn. A running turn is never cut. *"You may use
+  In1.Cu for DO06_BUF and DO08_BUF."*
+- **tell**: you describe the intent, the supervisor drafts a precise
+  directive, shown under "Directives" with **Approve** / **Reject**.
+  Nothing reaches the worker before you approve.
+- **resume**: leaves `BLOCKED` / `FAILED` (text required: your
+  resolution) or `PAUSED`. The run continues on the same worker thread and
+  the resolution goes to the worker with its next turn (not for a
+  `PROVIDER_CHECK` block, which is about the configuration). While a
+  mission waits for approval, **Approve mission** moves on; **resume**
+  with an instruction keeps working on the current mission instead.
+
+In short: **ask** to understand, **tell --raw** to instruct the worker,
+**tell** to have the supervisor write the instruction, **resume** to
+unblock.
+
 ### systemd (instead of tmux)
 
     coldprompt systemd --write        # writes ~/.config/systemd/user/coldprompt-{run,web}.service
