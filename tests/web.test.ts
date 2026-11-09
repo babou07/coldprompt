@@ -197,6 +197,7 @@ test('systemd units: graceful stop, no restart, web always on', () => {
   assert.match(run, /KillMode=mixed/);
   assert.match(run, /TimeoutStopSec=infinity/);
   assert.match(run, /Restart=no/);
+  assert.match(run, /SuccessExitStatus=3/);
   assert.match(run, /UnsetEnvironment=DRY_RUN/);
   assert.match(run, /WorkingDirectory=\/home\/u\/work\n/);
   assert.match(run, /Environment=COLDPROMPT_CONFIG=\/home\/u\/work\/coldprompt.yaml/);

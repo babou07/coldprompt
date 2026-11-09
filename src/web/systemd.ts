@@ -44,6 +44,8 @@ export function renderUnits(options: UnitOptions): Record<string, string> {
     'KillSignal=SIGTERM',
     'TimeoutStopSec=infinity',
     'Restart=no',
+    // Exit 3 = stopped while waiting for a human (BLOCKED / PAUSED): a normal end, not a failure.
+    'SuccessExitStatus=3',
     ''
   ].join('\n');
   const web = [

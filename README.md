@@ -259,7 +259,8 @@ unblock.
     loginctl enable-linger $USER                  # optional: keep running after logout
 
 The run unit is never started at login and never restarted
-automatically. `systemctl --user stop coldprompt-run` is graceful (it waits
+automatically. Stopping while blocked or paused (exit 3) counts as a normal
+end, not a failed unit. `systemctl --user stop coldprompt-run` is graceful (it waits
 for the current worker turn). Run `coldprompt systemd --write` again after
 moving coldprompt.yaml or changing your node/codex/claude installation (PATH).
 
