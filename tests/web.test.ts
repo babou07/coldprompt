@@ -113,6 +113,8 @@ test('web console: auth, command allowlist, live worker activity, turn reports',
       const status = await (await post('/api/command', { command: 'status' })).json();
       assert.equal(status.ok, true);
       assert.equal(status.data.blocked.kind, 'SUPERVISOR');
+      // The plan checklist: every session and mission with its progress.
+      assert.deepEqual(status.data.plan, [{ id: 'main', title: null, index: 1, missions: [{ id: 'a', title: 'Mission A', index: 1, status: 'ACTIVE' }] }]);
 
       // Turn report from artifacts; ids cannot escape the turns directory.
       const turnId = run.orchestrator.snapshotState.lastReview ? (await run.store.readEvents()).find((e) => e.type === 'turn.completed')!.data.turnId : '';

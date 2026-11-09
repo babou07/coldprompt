@@ -968,6 +968,11 @@ export class Orchestrator {
         const inSession = missions.findIndex((m) => m.id === mission.id) + 1;
         return { id: mission.id, title: mission.title, index: s.missionIndex + 1, of: this.config.missions.length, inSession, ofSession: missions.length };
       })() : null,
+      // The whole plan with each mission's progress (web console checklist).
+      plan: this.config.sessions.map((session, si) => ({
+        id: session.id, title: session.title ?? null, index: si + 1,
+        missions: session.missions.map((m, mi) => ({ id: m.id, title: m.title, index: mi + 1, status: s.missions[m.id]?.status ?? 'PENDING' }))
+      })),
       missionTurns: s.missionTurns,
       totalTurns: s.totalTurns,
       workerThreadId: mission ? this.threadFor(mission) ?? null : null,
