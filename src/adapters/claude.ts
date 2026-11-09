@@ -3,10 +3,13 @@ import { z } from 'zod';
 import { ColdPromptError, redact } from '../errors.js';
 import { spawnRunner, type CommandRunner, type RunResult } from './process.js';
 import {
-  buildEvaluationPrompt, buildInteractionPrompt, INTERACTION_JSON_SCHEMA, parseSupervisorOutput, REVIEW_JSON_SCHEMA, SUPERVISOR_SYSTEM_PROMPT,
-  type EvaluationContext, type InteractionRequest, type SupervisorAdapter, type SupervisorCallOptions
+  buildEvaluationPrompt, buildFinalizePrompt, buildInteractionPrompt, FINALIZE_JSON_SCHEMA, INTERACTION_JSON_SCHEMA, parseSupervisorOutput, REVIEW_JSON_SCHEMA, SUPERVISOR_SYSTEM_PROMPT,
+  type EvaluationContext, type FinalizeRequest, type InteractionRequest, type SupervisorAdapter, type SupervisorCallOptions
 } from '../supervisor.js';
-import { interactionSchema, reviewSchema, type ClaudeSupervisorConfig, type InteractionResult, type ProbeResult, type Review } from '../types.js';
+import { finalizeResultSchema, interactionSchema, reviewSchema, type ClaudeSupervisorConfig, type FinalizeResult, type InteractionResult, type ProbeResult, type Review } from '../types.js';
+
+/** Extra permissions of the finalize call (directories already resolved to absolute paths). */
+export interface ClaudeCallExtras { tools: string[]; allowedTools: string[]; addDirs: string[]; timeoutSeconds: number }
 
 export { INTERACTION_JSON_SCHEMA, REVIEW_JSON_SCHEMA };
 
@@ -64,6 +67,8 @@ export async function probeClaudeModel(runner: CommandRunner, command: string, c
 
 /** Flags this adapter relies on; checked against `claude --help` of the installed CLI. */
 export const REQUIRED_FLAGS = ['--print', '--output-format', '--json-schema', '--resume', '--session-id', '--append-system-prompt', '--tools', '--permission-mode'];
+/** Also needed when the supervisor has finalize permissions. */
+export const FINALIZE_FLAGS = ['--allowedTools', '--add-dir'];
 
 const cliResultSchema = z.object({
   type: z.string().optional(),
@@ -85,12 +90,15 @@ export class ClaudeSupervisorAdapter implements SupervisorAdapter {
     private readonly config: ClaudeSupervisorConfig,
     private readonly cwd: string,
     private readonly runner: CommandRunner = spawnRunner,
-    private readonly maxOutputChars = 20000
+    private readonly maxOutputChars = 20000,
+    /** config.finalize.addDirs resolved to absolute paths (by the registry). */
+    private readonly finalizeDirs: string[] = []
   ) {}
 
   /** Validates that the installed CLI supports every option we pass. Returns its version. */
   validateCli(): Promise<string> {
-    return validateClaudeCli(this.runner, this.config.command, this.cwd, [...REQUIRED_FLAGS, ...(this.config.model ? ['--model'] : [])], this.config.permissionMode);
+    return validateClaudeCli(this.runner, this.config.command, this.cwd,
+      [...REQUIRED_FLAGS, ...(this.config.model ? ['--model'] : []), ...(this.config.finalize ? FINALIZE_FLAGS : [])], this.config.permissionMode);
   }
 
   async resumeSession(sessionId: string, started: boolean): Promise<void> {
@@ -115,30 +123,39 @@ export class ClaudeSupervisorAdapter implements SupervisorAdapter {
     return this.validate(interactionSchema, value, 'interaction');
   }
 
+  async finalize(request: FinalizeRequest, options: SupervisorCallOptions = {}): Promise<FinalizeResult> {
+    const f = this.config.finalize;
+    const extras: ClaudeCallExtras = { tools: f?.tools ?? [], allowedTools: f?.allowedTools ?? [], addDirs: this.finalizeDirs, timeoutSeconds: f?.timeoutSeconds ?? this.config.timeoutSeconds };
+    const value = await this.call(buildFinalizePrompt(request, this.maxOutputChars), FINALIZE_JSON_SCHEMA, options.signal, extras);
+    return this.validate(finalizeResultSchema, value, 'finalize');
+  }
+
   private validate<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
     return parseSupervisorOutput(schema, value, `Claude ${label}`);
   }
 
-  buildArgs(schema: object, resume: boolean): string[] {
+  buildArgs(schema: object, resume: boolean, extras?: ClaudeCallExtras): string[] {
     const args = ['--print', '--output-format', 'json', '--json-schema', JSON.stringify(schema)];
     args.push(...(resume ? ['--resume', this.sessionId!] : ['--session-id', this.sessionId!]));
     args.push('--append-system-prompt', [SUPERVISOR_SYSTEM_PROMPT, this.config.appendSystemPrompt].filter(Boolean).join('\n\n'));
-    args.push('--tools', this.config.tools.join(','));
+    args.push('--tools', [...new Set([...this.config.tools, ...(extras?.tools ?? [])])].join(','));
+    if (extras?.allowedTools.length) args.push('--allowedTools', ...extras.allowedTools);
+    for (const dir of extras?.addDirs ?? []) args.push('--add-dir', dir);
     args.push('--permission-mode', this.config.permissionMode);
     if (this.config.model) args.push('--model', this.config.model);
     return args;
   }
 
-  private async call(prompt: string, schema: object, signal?: AbortSignal): Promise<unknown> {
+  private async call(prompt: string, schema: object, signal?: AbortSignal, extras?: ClaudeCallExtras): Promise<unknown> {
     // The orchestrator serializes calls; this is a second line of defence.
     if (this.busy) throw new ColdPromptError('SESSION_LOCK', 'Concurrent write to the Claude supervisor conversation refused');
     this.busy = true;
     try {
       if (!this.sessionId) this.sessionId = randomUUID();
-      let run = await this.invoke(prompt, schema, this.started, signal);
+      let run = await this.invoke(prompt, schema, this.started, signal, extras);
       if (!this.started && run.code !== 0 && /already in use|already exists/i.test(run.stdout + run.stderr)) {
         // A previous call created the conversation but failed before we recorded it.
-        run = await this.invoke(prompt, schema, true, signal);
+        run = await this.invoke(prompt, schema, true, signal, extras);
       }
       return this.parse(run);
     } finally {
@@ -146,10 +163,10 @@ export class ClaudeSupervisorAdapter implements SupervisorAdapter {
     }
   }
 
-  private async invoke(prompt: string, schema: object, resume: boolean, signal?: AbortSignal): Promise<RunResult> {
+  private async invoke(prompt: string, schema: object, resume: boolean, signal?: AbortSignal, extras?: ClaudeCallExtras): Promise<RunResult> {
     try {
-      return await this.runner(this.config.command, this.buildArgs(schema, resume), {
-        input: prompt, cwd: this.cwd, signal, timeoutMs: this.config.timeoutSeconds * 1000
+      return await this.runner(this.config.command, this.buildArgs(schema, resume, extras), {
+        input: prompt, cwd: this.cwd, signal, timeoutMs: (extras?.timeoutSeconds ?? this.config.timeoutSeconds) * 1000
       });
     } catch (error) {
       if ((error as Error).name === 'AbortError') throw error;

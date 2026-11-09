@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { classifyError, errorMessage, ColdPromptError, redact, redactValue, type ErrorKind } from './errors.js';
 import { commitsBetween, repositoryChanged, snapshot } from './git.js';
 import { initialState, Store } from './store.js';
+import { dirname } from 'node:path';
+import { extractOutput, outputInstruction } from './outputs.js';
 import { runVerifiers, type Verifier } from './verification.js';
 import type { SupervisorAdapter, SupervisorCallOptions } from './supervisor.js';
 import type { WorkerAdapter, WorkerTurnResult } from './worker.js';
@@ -45,6 +47,8 @@ export interface OrchestratorOptions {
   /** Absolute path of the target repository. */
   workingDirectory: string;
   verifiers?: Verifier[];
+  /** coldprompt.yaml (the finalize call gets its directory). */
+  configPath?: string;
   /** Dry-run only: no human approval at mission or session transitions. */
   autoApproveTransitions?: boolean;
   sleep?: Sleep;
@@ -100,6 +104,8 @@ export function coldPromptText(mission: Mission): string {
     '',
     '## Completion criteria',
     ...(mission.completionCriteria.length ? mission.completionCriteria.map((c) => `- ${c}`) : ['- (none declared)']),
+    '',
+    mission.execution.output ? outputInstruction(mission.execution.output) : '',
     '',
     mission.execution.readOnly ? 'This mission is READ-ONLY: do not modify, create or delete files, and do not commit.' : '',
     'At the end of each turn, report concrete evidence (commands run and their results, files changed, commits).',
@@ -252,7 +258,10 @@ export class Orchestrator {
       this.kickHotPrompts();
       while (!this.stopping) {
         const status = this.state.status;
-        if (status === 'COMPLETED') break;
+        if (status === 'COMPLETED') {
+          await this.finalizeIfNeeded();
+          break;
+        }
         if (status === 'BLOCKED' || status === 'FAILED' || status === 'PAUSED') {
           const waitStart = this.now();
           await this.waitForChange();
@@ -507,6 +516,8 @@ export class Orchestrator {
     const commits = await commitsBetween(this.options.workingDirectory, gitBefore.head, gitAfter.head);
     const resultRef = await this.store.writeArtifact(`${turnId}.worker`, { turnId, missionId: mission.id, prompt, result, gitBefore, gitAfter, commits });
     const verification = await runVerifiers(this.verifiers, { workingDirectory: this.options.workingDirectory, mission, phase: 'turn' }, { gitClean: false });
+    const output = await this.captureOutput(mission, result.finalResponse);
+    if (output) verification.push(output);
     if (verification.length) await this.store.writeArtifact(`${turnId}.verification`, verification);
 
     this.runTurns += 1;
@@ -781,6 +792,22 @@ export class Orchestrator {
   }
 
   private async verifyCompletion(mission: Mission, pending: PendingTurn, review: Review): Promise<void> {
+    const outputName = mission.execution.output;
+    if (outputName && !this.state.missions[mission.id]?.output) {
+      // The worker can always deliver it, read-only or not: no repository change is needed.
+      const summary = `- output ${outputName} FAILED: no valid "coldprompt-output ${outputName}" block was delivered`;
+      await this.mutate((s) => {
+        s.pendingTurn = undefined;
+        s.nextWorkerInput = {
+          source: 'VERIFICATION',
+          text: `The supervisor considered the mission complete, but its structured output is missing:\n${summary}\n\n${outputInstruction(outputName)}`
+        };
+        s.lastError = { kind: 'COMPLETION_REJECTED', message: summary, at: new Date().toISOString() };
+      });
+      this.log(`MISSION_COMPLETE for ${mission.id} rejected: output ${outputName} missing`);
+      await this.emit('mission.completion_rejected', { missionId: mission.id, failed: [`output ${outputName}`] });
+      return;
+    }
     const outcomes: VerificationOutcome[] = await runVerifiers(
       this.verifiers,
       { workingDirectory: this.options.workingDirectory, mission, phase: 'completion' },
@@ -832,6 +859,83 @@ export class Orchestrator {
       await this.emit('mission.auto_approved', { missionId: mission.id, sessionId: mission.session, nextSessionId: endsSession ? next.session : undefined });
     }
     await this.completeMission(mission, (s) => { s.pendingTurn = undefined; });
+  }
+
+  /** Stores the mission's structured output when the turn delivered one; reported like a per-turn check. */
+  private async captureOutput(mission: Mission, finalResponse: string): Promise<VerificationOutcome | undefined> {
+    const name = mission.execution.output;
+    if (!name) return undefined;
+    const started = this.now();
+    const found = extractOutput(finalResponse ?? '', name);
+    const outcome = (passed: boolean, output: string): VerificationOutcome => ({ name: `output ${name}`, passed, output, durationMs: this.now() - started });
+    if (!found.found) {
+      return outcome(Boolean(this.state.missions[mission.id]?.output),
+        this.state.missions[mission.id]?.output ? 'not repeated this turn; the stored output is kept' : 'not delivered yet');
+    }
+    if (!found.ok) return outcome(false, `block found but rejected: ${found.error}`);
+    const path = await this.store.writeOutput(mission.id, found.value);
+    await this.mutate((s) => { s.missions[mission.id] = { ...s.missions[mission.id], output: { name, path, at: new Date().toISOString() } }; });
+    await this.emit('mission.output', { missionId: mission.id, name });
+    return outcome(true, `stored in ${path}`);
+  }
+
+  /**
+   * The plan's last supervisor call (config finalize), once per completed
+   * plan: again only when missions were added since. A failure is recorded
+   * and retried at the next run start; it never reopens a mission.
+   */
+  private async finalizeIfNeeded(): Promise<void> {
+    const finalize = this.config.finalize;
+    const last = this.config.missions.at(-1)?.id;
+    if (!finalize || !last || this.stopping) return;
+    if (this.state.finalize?.status === 'DONE' && this.state.finalize.afterMission === last) return;
+    const record = async (progress: Omit<NonNullable<State['finalize']>, 'afterMission' | 'at'>) => {
+      await this.mutate((s) => { s.finalize = { ...progress, afterMission: last, at: new Date().toISOString() }; });
+    };
+    const supervisor = this.options.supervisor;
+    if (!supervisor.finalize) {
+      const error = `The ${supervisor.provider} supervisor does not support finalize`;
+      await record({ status: 'FAILED', error });
+      await this.emit('plan.finalize_failed', { error });
+      this.log(`finalize: ${error}`);
+      return;
+    }
+    const inputs = [];
+    for (const id of finalize.inputs) {
+      const mission = this.config.missions.find((m) => m.id === id)!;
+      const progress = this.state.missions[id];
+      const output = progress?.output ? await this.store.readOutput(id) : undefined;
+      let lastReport: string | undefined;
+      const ref = progress?.resultRefs?.at(-1);
+      if (output === undefined && ref) {
+        try { lastReport = (await this.store.readArtifact<{ result: WorkerTurnResult }>(ref)).result.finalResponse; } catch { /* missing artifact */ }
+      }
+      inputs.push({ missionId: id, title: mission.title, outputName: progress?.output?.name, outputPath: progress?.output?.path, output, lastReport });
+    }
+    const request = {
+      prompt: finalize.prompt,
+      project: this.config.project.name,
+      configDirectory: dirname(this.options.configPath ?? this.options.workingDirectory),
+      plan: this.config.sessions.map((session) => ({
+        id: session.id, title: session.title,
+        missions: session.missions.map((m) => ({ id: m.id, title: m.title, status: this.state.missions[m.id]?.status ?? 'PENDING' }))
+      })),
+      inputs
+    };
+    this.log('finalize: calling the supervisor');
+    await this.emit('plan.finalize_started', { afterMission: last, inputs: finalize.inputs });
+    try {
+      const result = await this.supervisorCall('finalize', (signal) => supervisor.finalize!(request, { signal }));
+      await record({ status: 'DONE', summary: result.summary, files: result.files });
+      await this.emit('plan.finalized', { summary: result.summary, files: result.files });
+      this.log(`finalize done: ${result.summary}`);
+    } catch (error) {
+      if (this.stopping && classifyError(error) === 'CANCELLED') return;
+      const message = redact(errorMessage(error));
+      await record({ status: 'FAILED', error: message });
+      await this.emit('plan.finalize_failed', { error: message });
+      this.log(`finalize failed: ${message}`);
+    }
   }
 
   private async completeMission(mission: Mission, extra?: (s: State) => void): Promise<void> {
@@ -993,6 +1097,7 @@ export class Orchestrator {
       approvedDirectives: s.directives.filter((d) => d.status === 'APPROVED').map((d) => ({ id: d.id, content: d.content })),
       retry: s.retry ?? null,
       lastError: s.lastError ?? null,
+      finalize: this.config.finalize ? (s.finalize ?? null) : undefined,
       git: s.lastGit ?? null
     };
   }

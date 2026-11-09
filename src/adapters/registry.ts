@@ -2,6 +2,7 @@ import type { SupervisorAdapter } from '../supervisor.js';
 import type { SupervisorConfig, WorkerConfig } from '../types.js';
 import type { WorkerAdapter } from '../worker.js';
 import { errorMessage } from '../errors.js';
+import { resolveConfigPath } from '../config.js';
 import { ClaudeSupervisorAdapter } from './claude.js';
 import { ClaudeWorkerAdapter } from './claude-worker.js';
 import { checkCodexBinary, CodexWorkerAdapter } from './codex.js';
@@ -20,6 +21,8 @@ export interface ProviderContext {
   /** The target repository. */
   workingDirectory: string;
   maxWorkerOutputChars: number;
+  /** coldprompt.yaml: config paths (e.g. finalize directories) are relative to it. */
+  configPath?: string;
 }
 
 interface Provider<C, A> {
@@ -62,7 +65,8 @@ export const WORKER_PROVIDERS: ProvidersFor<WorkerConfig, WorkerAdapter> = {
 
 export const SUPERVISOR_PROVIDERS: ProvidersFor<SupervisorConfig, SupervisorAdapter> = {
   claude: {
-    create: (config, context) => new ClaudeSupervisorAdapter(config, context.workingDirectory, undefined, context.maxWorkerOutputChars),
+    create: (config, context) => new ClaudeSupervisorAdapter(config, context.workingDirectory, undefined, context.maxWorkerOutputChars,
+      (config.finalize?.addDirs ?? []).map((dir) => context.configPath ? resolveConfigPath(context.configPath, dir) : dir)),
     check: (config, context) => cliCheck('supervisor', () => new ClaudeSupervisorAdapter(config, context.workingDirectory).validateCli())
   },
   codex: {

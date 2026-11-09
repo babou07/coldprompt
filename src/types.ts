@@ -30,7 +30,14 @@ export const missionSchema = z.object({
   completionCriteria: z.array(z.string()).default([]),
   execution: z.object({
     readOnly: z.boolean().default(false),
-    maxTurns: z.number().int().positive().optional()
+    maxTurns: z.number().int().positive().optional(),
+    /**
+     * Name of a structured output the worker must deliver: one JSON value in
+     * a fenced block of its final answer (see OUTPUT_FENCE). ColdPrompt stores
+     * it under outputs/ and does not accept completion without it. Its meaning
+     * belongs to whoever reads it (e.g. the plan's finalize step).
+     */
+    output: z.string().regex(/^[a-zA-Z0-9_-]+$/).optional()
   }).strict().default({}),
   /** Names of verifications (commands or plugins) required for this mission. Default: all. */
   verification: z.array(z.string()).optional(),
@@ -105,7 +112,19 @@ export const claudeSupervisorSchema = z.object({
   tools: z.array(z.string()).default(['Read', 'Grep', 'Glob']),
   permissionMode: claudePermissionMode.default('dontAsk'),
   timeoutSeconds: z.number().positive().default(900),
-  appendSystemPrompt: z.string().optional()
+  appendSystemPrompt: z.string().optional(),
+  /**
+   * Extra permissions for the plan's finalize call ONLY (the reviews stay
+   * read-only): tools added for that call, rules allowed without asking
+   * (e.g. "Edit(//abs/dir/**)", "Bash(/abs/script.py:*)"), and directories
+   * outside the repository it may read (relative to coldprompt.yaml, or ~/).
+   */
+  finalize: z.object({
+    tools: z.array(z.string()).default([]),
+    allowedTools: z.array(z.string()).default([]),
+    addDirs: z.array(z.string()).default([]),
+    timeoutSeconds: z.number().positive().default(1800)
+  }).strict().optional()
 }).strict();
 
 /** Codex as supervisor: always a read-only sandbox, never asks for approval. */
@@ -156,13 +175,38 @@ const baseConfigShape = {
   verification: z.object({
     commands: z.array(verificationCommandSchema).default([]),
     plugins: z.array(verificationPluginSchema).default([])
-  }).default({})
+  }).default({}),
+  /**
+   * One last supervisor call once every mission is complete (e.g. write the
+   * next session files, send a report). Its permissions are the supervisor
+   * provider's `finalize` options. It runs again only when missions were
+   * added to the plan afterwards.
+   */
+  finalize: z.object({
+    prompt: z.string().min(1),
+    /** Missions whose structured output (or, without one, last report) is given to the call. */
+    inputs: z.array(z.string()).default([])
+  }).strict().optional(),
+  /**
+   * Session files proposed for a next plan (written by the finalize step, or
+   * by hand). The web console lists them; "Accept" moves a file into
+   * acceptInto, which the plan includes through a "dir/*.yaml" entry.
+   * Paths are relative to coldprompt.yaml.
+   */
+  proposals: z.object({
+    directory: z.string().min(1),
+    acceptInto: z.string().min(1)
+  }).strict().optional()
 };
 
 /** coldprompt.yaml as written: shared settings plus the session files, in order. */
 export const planSchema = z.object({
   ...baseConfigShape,
-  /** Session file paths, relative to coldprompt.yaml, executed one after another. */
+  /**
+   * Session file paths, relative to coldprompt.yaml, executed one after
+   * another. An entry may end with a "*" pattern in its last segment (e.g.
+   * sessions/accepted/*.yaml): matching files, sorted by name.
+   */
   sessions: z.array(z.string().min(1)).min(1)
 });
 
@@ -194,6 +238,10 @@ export const configSchema = z.object({
   }
   if (config.sessions[0]?.handoff === 'previous') {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['sessions', 0, 'handoff'], message: 'The first session has no previous session to hand off from' });
+  }
+  const missionIds = new Set(config.sessions.flatMap((s) => s.missions.map((m) => m.id)));
+  for (const id of config.finalize?.inputs ?? []) {
+    if (!missionIds.has(id)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['finalize', 'inputs'], message: `Unknown mission "${id}"` });
   }
   config.sessions.forEach((session, si) => session.missions.forEach((mission, index) => {
     for (const name of mission.verification ?? []) {
@@ -362,6 +410,8 @@ export interface MissionProgress {
   session?: string;
   /** Worker turn artifacts of this mission, oldest first (used by handoff). */
   resultRefs?: string[];
+  /** The structured output (execution.output), once a valid one was delivered. */
+  output?: { name: string; path: string; at: string };
   startedAt?: string;
   completedAt?: string;
 }
@@ -374,6 +424,25 @@ export interface SessionProgress {
   startedAt?: string;
   completedAt?: string;
 }
+
+/** The plan's finalize call: done once per completed plan (afterMission = the last mission then). */
+export interface FinalizeProgress {
+  status: 'DONE' | 'FAILED';
+  afterMission: string;
+  at: string;
+  summary?: string;
+  files?: string[];
+  error?: string;
+}
+
+export const finalizeResultSchema = z.object({
+  /** What was done, for the human (shown in the console). */
+  summary: z.string(),
+  /** Files written, absolute or relative to coldprompt.yaml. */
+  files: z.array(z.string())
+}).strict();
+
+export type FinalizeResult = z.infer<typeof finalizeResultSchema>;
 
 export interface ErrorInfo {
   kind: string;
@@ -413,6 +482,7 @@ export interface State {
   hotPrompts: HotPrompt[];
   directives: Directive[];
   lastGit?: GitSnapshot;
+  finalize?: FinalizeProgress;
   retry?: ErrorInfo;
   lastError?: ErrorInfo;
   createdAt: string;

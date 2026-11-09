@@ -165,6 +165,15 @@ even an interrupted first turn keeps its thread.
   from `worker.progress` events (SDK `item.*` stream, outputs clipped);
   they are persisted, so a reconnecting page replays the last 400 events.
   Default bind is localhost; remote access through `tailscale serve`.
+- **Plan chaining.** Mission outputs are fenced JSON blocks parsed from the
+  worker's final answer (`src/outputs.ts`), capped at 200k characters and
+  redacted before storage; they feed later prompts but never decide on a
+  mission. `finalize` is a separate supervisor call with its own, wider
+  Claude permissions (`--allowedTools`, `--add-dir`), so review calls keep
+  their read-only tool set. Its progress (`state.finalize`, keyed by the
+  last mission id) makes it idempotent across restarts. Proposals are plain
+  session files moved into a directory the plan globs, so accepting one is
+  just a file move validated against existing ids.
 
 ## Open risks / not done
 

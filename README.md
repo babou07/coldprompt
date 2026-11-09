@@ -118,6 +118,38 @@ Environment: `COLDPROMPT_CONFIG` (default `coldprompt.yaml`), `COLDPROMPT_HOME`
 See `coldprompt.example.yaml` and `examples/` for a complete example. `coldprompt doctor`
 lists the sessions, their missions and which thread each will use.
 
+### Chaining plans: outputs, finalize, proposals
+
+    # coldprompt.yaml
+    sessions:
+      - sessions/s01-pilot.yaml
+      - sessions/accepted/*.yaml    # "*" in the file name only; sorted by name
+    finalize:                       # one supervisor call once every mission is complete
+      prompt: "Write the next session files into sessions/proposed/, then summarize."
+      inputs: [audit]               # missions whose output (or last report) is given to it
+    proposals:
+      directory: sessions/proposed
+      acceptInto: sessions/accepted # must be covered by a "dir/*.yaml" sessions entry
+    supervisor:
+      provider: claude
+      finalize:                     # extra permissions for the finalize call only
+        tools: [Write]
+        allowedTools: ["Write(//home/me/workspace/sessions/proposed/**)"]
+        addDirs: [sessions]         # relative to coldprompt.yaml, or ~/
+        timeoutSeconds: 1800
+
+- **Structured output.** A mission with `execution: { output: findings }` must end its
+  final answer with one ` ```coldprompt-output findings ` block of strict JSON. It is stored
+  in `outputs/<mission>.json` (state directory); the mission cannot complete without a
+  valid block. It is data for a later step, not a decision: the supervisor still reviews.
+- **Finalize.** Runs once per completed plan (again only if missions were appended
+  later). Its answer is `{ summary, files }`, shown in the console. A failure is
+  recorded and retried at the next run. Only the Claude supervisor supports it;
+  reviews stay read-only.
+- **Proposals.** The web console lists the session files in `proposals.directory`;
+  *Accept* moves one into `acceptInto` (refused on a session or mission id clash),
+  *Dismiss* moves it to `dismissed/`. Accepted sessions run at the next *Start run*.
+
 ### Providers
 
 `worker:` and `supervisor:` each pick a `provider:`. Codex and Claude Code

@@ -30,6 +30,12 @@ export const PAGE_HTML = `<!doctype html>
     </div>
     <div id="plan" class="plan" aria-label="progress"></div>
     <button id="plan-approve" class="primary" disabled>Nothing to approve</button>
+    <div id="proposals" class="proposals" hidden>
+      <div class="row"><strong>Proposed sessions</strong><span class="spacer"></span><button id="proposals-refresh" class="link">refresh</button></div>
+      <div id="finalize" class="small" hidden></div>
+      <div id="proposal-notes" class="small"></div>
+      <div id="proposal-list"></div>
+    </div>
   </div>
 </header>
 
@@ -126,6 +132,12 @@ button.link.danger{color:var(--bad)}
 .plan input{pointer-events:none;accent-color:var(--accent);width:auto;padding:0;border:0;margin:0;flex:none;position:relative;top:2px}
 .plan .t{color:var(--muted);font-weight:400}
 #plan-approve{align-self:flex-start}
+.proposals{border-top:1px solid var(--line);padding-top:8px;display:flex;flex-direction:column;gap:6px;max-height:min(40vh,320px);overflow-y:auto;overscroll-behavior:contain}
+.proposal{border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:13px}
+.proposal .ptitle{font-weight:600;word-break:break-word}
+.proposal ul{margin:4px 0;padding-left:18px}
+.proposal .err{color:var(--bad);white-space:pre-wrap;word-break:break-word}
+#finalize.bad{color:var(--bad)}
 .plan .waiting{color:var(--bad);font-weight:600;white-space:nowrap}
 #feed{flex:1;padding:4px 0}
 .divider{margin:14px 12px 4px;font-size:12.5px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
@@ -185,6 +197,7 @@ let mode = 'ask';
 let status = null;
 let connected = false;
 let canStart = false;
+let proposalsEnabled = false;
 let follow = true;
 let streamAbort = null;
 const turns = new Map();     // turnId -> { card, body, items: Map, plan }
@@ -273,6 +286,8 @@ function handle(name, data) {
     for (const e of data.history) renderEvent(e);
     follow = keepFollow; scrollEnd(true);
     canStart = data.canStart === true;
+    proposalsEnabled = data.proposals === true;
+    if (proposalsEnabled) loadProposals();
     setConn(data.connected);
     if (data.status) renderStatus(data.status);
   } else if (name === 'status') renderStatus(data);
@@ -362,6 +377,7 @@ function renderStatus(s) {
   }
   const badge = $('#badge');
   renderPlan(s);
+  renderFinalize(s.finalize);
   const b = s.blocked;
   // A mission waiting for approval is a normal step, not an incident.
   const approval = !!b && s.status === 'BLOCKED' && b.kind === 'MISSION_APPROVAL';
@@ -507,6 +523,10 @@ function renderEvent(e) {
     case 'runtime.resumed': note('▶ resumed'); break;
     case 'runtime.paused': note('paused'); break;
     case 'runtime.completed': note('✓ all missions completed'); break;
+    case 'mission.output': note('output "' + d.name + '" of ' + d.missionId + ' stored'); break;
+    case 'plan.finalize_started': note(names.supervisor + ' finalizes the plan…'); break;
+    case 'plan.finalized': note('✓ plan finalized: ' + d.summary); if (proposalsEnabled) loadProposals(); break;
+    case 'plan.finalize_failed': note('finalize failed: ' + d.error, 'bad'); if (proposalsEnabled) loadProposals(); break;
     case 'runtime.limit_reached': note('limit reached: ' + d.reason, 'bad'); break;
     case 'hot_prompt.received': {
       pendingQuestions.set(d.id, d.content);
@@ -527,6 +547,68 @@ function renderEvent(e) {
     case 'directive.rejected': note('directive ' + d.id + ' rejected'); break;
     default: break;
   }
+}
+
+// ---------------------------------------------------------------- proposals
+function renderFinalize(f) {
+  const box = $('#finalize');
+  box.hidden = !f;
+  if (!f) return;
+  box.className = 'small' + (f.status === 'FAILED' ? ' bad' : '');
+  box.textContent = (f.status === 'DONE' ? 'Finalized ' : 'Finalize FAILED ') + new Date(f.at).toLocaleString() + ': ' + (f.status === 'DONE' ? (f.summary || '') : (f.error || '')) + (f.status === 'FAILED' ? ' (retried at the next Start run)' : '');
+  $('#proposals').hidden = false;
+}
+
+async function loadProposals() {
+  let r;
+  try { r = await api('/api/proposals'); } catch { return; }
+  if (!r.ok) return;
+  const list = $('#proposal-list'), notes = $('#proposal-notes');
+  list.textContent = ''; notes.textContent = '';
+  for (const n of r.data.notes) {
+    const b = el('button', 'link', n.file);
+    b.onclick = () => showText(n.file, n.text);
+    notes.append(b, document.createTextNode(' '));
+  }
+  for (const p of r.data.items) {
+    const card = el('div', 'proposal');
+    card.append(el('div', 'ptitle', (p.id || p.file) + (p.title ? ' — ' + p.title : '')));
+    if (p.error) card.append(el('div', 'err small', p.error));
+    else {
+      const ul = el('ul', '');
+      for (const m of p.missions) ul.append(el('li', '', m.title + (m.readOnly ? ' (read only)' : '') + (m.requireHumanApproval ? ' · waits for approval' : '')));
+      card.append(el('div', 'muted small', p.file + ' · ' + p.missions.length + ' mission(s)'), ul);
+    }
+    const actions = el('div', 'actions-inline');
+    if (!p.error) {
+      const accept = el('button', 'link', 'Accept');
+      accept.onclick = () => proposalAction('accept', p, 'Accept ' + (p.id || p.file) + ' into the plan? Accepting authorizes its missions; they run at the next Start run.');
+      actions.append(accept, el('span', 'sep', ' | '));
+    }
+    const dismiss = el('button', 'link danger', 'Dismiss');
+    dismiss.onclick = () => proposalAction('dismiss', p, 'Dismiss ' + p.file + '? It moves to dismissed/.');
+    actions.append(dismiss);
+    card.append(actions);
+    list.append(card);
+  }
+  $('#proposals').hidden = !r.data.items.length && !r.data.notes.length && $('#finalize').hidden;
+}
+
+async function proposalAction(action, p, question) {
+  if (!confirm(question)) return;
+  try {
+    const r = await api('/api/proposals/' + action, { file: p.file });
+    if (r.ok) toast(r.data.message); else toast(r.error || 'error', true);
+  } catch (e) { toast(e.message, true); }
+  loadProposals();
+}
+
+function showText(title, text) {
+  $('#report-title').textContent = title;
+  const body = $('#report-body');
+  body.textContent = '';
+  body.append(el('pre', '', text));
+  $('#report').showModal();
 }
 
 async function openReport(turnId) {
@@ -601,6 +683,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#menu-btn').onclick = () => setPanel($('#menu').hidden);
   for (const b of document.querySelectorAll('#menu [data-cmd]')) b.onclick = () => { command(b.dataset.cmd, '', false, b.dataset.cmd === 'stop' ? 'Stop ColdPrompt after the current turn?' : ''); };
   $('#logout').onclick = () => logout();
+  $('#proposals-refresh').onclick = () => loadProposals();
   $('#report-close').onclick = () => $('#report').close();
   $('#start-run').onclick = async () => {
     if (!confirm('Start the ColdPrompt run of ' + ($('#project').textContent || 'this project') + '? It reloads the YAML files.')) return;

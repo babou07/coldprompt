@@ -178,6 +178,24 @@ export class Store {
     return ref;
   }
 
+  /** Path of a mission's structured output (execution.output). */
+  outputPath(missionId: string): string { return join(this.directory, 'outputs', `${missionId}.json`); }
+
+  async writeOutput(missionId: string, value: unknown): Promise<string> {
+    await mkdir(join(this.directory, 'outputs'), { recursive: true, mode: 0o700 });
+    await writeAtomic(this.outputPath(missionId), JSON.stringify(redactValue(value), null, 2));
+    return this.outputPath(missionId);
+  }
+
+  async readOutput(missionId: string): Promise<unknown | undefined> {
+    try {
+      return JSON.parse(await readFile(this.outputPath(missionId), 'utf8'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw error;
+    }
+  }
+
   async readArtifact<T>(ref: string): Promise<T> {
     return JSON.parse(await readFile(join(this.directory, ref), 'utf8')) as T;
   }

@@ -4,7 +4,7 @@ import { homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { loadConfig, resolveWorkingDirectory } from './config.js';
+import { loadConfig, resolveConfigPath, resolveWorkingDirectory } from './config.js';
 import { Store } from './store.js';
 import { Orchestrator, HELP_TEXT } from './orchestrator.js';
 import { snapshot } from './git.js';
@@ -14,6 +14,7 @@ import { checkProviders, createSupervisor, createWorker, type ProviderContext } 
 import { FakeSupervisorAdapter, FakeWorkerAdapter } from './adapters/fake.js';
 import { ConsoleServer } from './console/server.js';
 import { formatStatus, runInteractiveConsole, sendOnce } from './console/client.js';
+import { buildFinalizePrompt } from './supervisor.js';
 import { parseCommandLine } from './console/protocol.js';
 import type { Config } from './types.js';
 import { WebServer, loadOrCreateToken } from './web/server.js';
@@ -71,7 +72,7 @@ async function checkHomeLocation(config: Config, workdir: string): Promise<strin
 }
 
 function providerContext(config: Config, workdir: string): ProviderContext {
-  return { workingDirectory: workdir, maxWorkerOutputChars: config.runtime.maxWorkerOutputChars };
+  return { workingDirectory: workdir, maxWorkerOutputChars: config.runtime.maxWorkerOutputChars, configPath };
 }
 
 async function doctor(): Promise<number> {
@@ -114,6 +115,16 @@ async function doctor(): Promise<number> {
     const thread = recorded ? `worker thread ${recorded}` : session.resumeThread ? `RESUMES existing worker thread ${session.resumeThread}` : 'new worker thread';
     ok(`session ${index + 1}/${config.sessions.length} ${session.id} (${session.file ?? 'inline'}): ${session.missions.length} mission(s) [${session.missions.map((m) => m.id).join(', ')}], ${thread}${session.handoff === 'previous' ? ', handoff from previous session' : ''}`);
   }
+  if (config.finalize) {
+    const supervisor = createSupervisor(config.supervisor, providerContext(config, workdir));
+    if (!supervisor.finalize) bad(`finalize: the ${config.supervisor.provider} supervisor does not support it`);
+    else {
+      const extra = config.supervisor.provider === 'claude' && config.supervisor.finalize;
+      ok(`finalize: supervisor call after the last mission, inputs [${config.finalize.inputs.join(', ')}]${extra ? `; extra tools [${extra.tools.join(', ')}], ${extra.allowedTools.length} allowed rule(s), dirs [${extra.addDirs.join(', ')}]` : '; no extra supervisor permissions'}`);
+    }
+  }
+  if (config.proposals) ok(`proposals: ${resolveConfigPath(configPath, config.proposals.directory)} -> accepted into ${resolveConfigPath(configPath, config.proposals.acceptInto)}`);
+  for (const mission of config.missions.filter((m) => m.execution.output)) ok(`mission ${mission.id} delivers output "${mission.execution.output}" (${store.outputPath(mission.id)})`);
   if (process.env.CODEX_THREAD_ID) ok('CODEX_THREAD_ID is set in this environment; ColdPrompt ignores it (use resumeThread in a session file)');
   const lock = await store.readLock();
   if (lock) warn(`state directory owned by pid ${lock.pid} on ${lock.hostname} since ${lock.acquiredAt}`);
@@ -137,9 +148,13 @@ async function run(dryRun: boolean): Promise<number> {
       return { finalResponse: '(dry-run: no worker executed)' };
     });
     const supervisor = new FakeSupervisorAdapter([], [], { decision: 'MISSION_COMPLETE', reason: 'dry-run', workerInstruction: '' });
+    supervisor.finalize = async (request) => {
+      log(`[dry-run] supervisor finalize prompt:\n${buildFinalizePrompt(request, config.runtime.maxWorkerOutputChars)}\n`);
+      return { summary: 'dry-run: finalize not executed', files: [] };
+    };
     orchestrator = new Orchestrator({
       config: { ...config, runtime: { ...config.runtime, verifyGitCleanOnCompletion: false, autoApproveMissions: true } },
-      store: orchestratorStore, worker, supervisor, workingDirectory: workdir, verifiers: [], log,
+      store: orchestratorStore, worker, supervisor, workingDirectory: workdir, verifiers: [], log, configPath,
       autoApproveTransitions: true
     });
   } else {
@@ -151,10 +166,11 @@ async function run(dryRun: boolean): Promise<number> {
     const failed = checks.filter((c) => c.level === 'fail');
     if (failed.length) throw new ColdPromptError('INVALID_CONFIG', failed.map((c) => c.message).join('; '));
     const supervisor = createSupervisor(config.supervisor, context);
+    if (config.finalize && !supervisor.finalize) throw new ColdPromptError('INVALID_CONFIG', `finalize is configured, but the ${config.supervisor.provider} supervisor does not support it`);
     const worker = createWorker(config.worker, context);
     const verifiers = await buildVerifiers(config, configDirectoryOf(configPath));
     orchestrator = new Orchestrator({
-      config, store, worker, supervisor, workingDirectory: workdir, verifiers, log
+      config, store, worker, supervisor, workingDirectory: workdir, verifiers, log, configPath
     });
   }
 
@@ -200,10 +216,19 @@ async function web(): Promise<number> {
   const host = option('--host') ?? process.env.COLDPROMPT_WEB_HOST ?? '127.0.0.1';
   const port = Number(option('--port') ?? process.env.COLDPROMPT_WEB_PORT ?? DEFAULT_WEB_PORT);
   const runUnit = option('--run-unit');
-  const projectName = await loadConfig(configPath).then((c) => c.project.name, () => 'coldprompt');
+  const initial = await loadConfig(configPath).catch(() => undefined);
+  const projectName = initial?.project.name ?? 'coldprompt';
+  const proposals = initial?.proposals ? {
+    directory: resolveConfigPath(configPath, initial.proposals.directory),
+    acceptInto: resolveConfigPath(configPath, initial.proposals.acceptInto),
+    planIds: async () => {
+      const c = await loadConfig(configPath);
+      return { sessions: c.sessions.map((s) => s.id), missions: c.missions.map((m) => m.id) };
+    }
+  } : undefined;
   const token = await loadOrCreateToken(store);
   const server = new WebServer({
-    store, socketPath: store.socketPath, host, port, token, projectName, log,
+    store, socketPath: store.socketPath, host, port, token, projectName, log, proposals,
     startRun: runUnit ? () => startUnit(runUnit, { exec: (file, args) => exec(file, args), redact }) : undefined
   });
   await server.start();

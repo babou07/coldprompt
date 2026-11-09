@@ -1,6 +1,6 @@
 import type { z } from 'zod';
 import { ColdPromptError } from './errors.js';
-import { DECISIONS, type GitSnapshot, type ProbeResult, type InteractionResult, type Mission, type Review, type VerificationOutcome } from './types.js';
+import { DECISIONS, type FinalizeResult, type GitSnapshot, type ProbeResult, type InteractionResult, type Mission, type Review, type VerificationOutcome } from './types.js';
 import type { WorkerTurnResult } from './worker.js';
 
 export interface EvaluationContext {
@@ -31,6 +31,19 @@ export interface InteractionRequest {
   blockedReason?: string;
   lastReview?: Review;
   lastWorkerResult?: string;
+}
+
+/** The plan's last call (config `finalize`), once every mission is complete. */
+export interface FinalizeRequest {
+  /** The user's instructions (config finalize.prompt). */
+  prompt: string;
+  project: string;
+  /** Directory of coldprompt.yaml: relative paths in the answer are relative to it. */
+  configDirectory: string;
+  /** Sessions and missions of the plan with their status. */
+  plan: Array<{ id: string; title?: string; missions: Array<{ id: string; title: string; status: string }> }>;
+  /** finalize.inputs: each mission's structured output, or its last report when it has none. */
+  inputs: Array<{ missionId: string; title: string; outputName?: string; outputPath?: string; output?: unknown; lastReport?: string }>;
 }
 
 export interface SupervisorCallOptions {
@@ -84,7 +97,22 @@ export interface SupervisorAdapter {
   isSessionStarted(): boolean;
   /** Optional: a cheap call proving that the configured model answers (run start). */
   probe?(workingDirectory: string, signal?: AbortSignal): Promise<ProbeResult>;
+  /**
+   * Optional: the plan's finalize call, in the same conversation, with the
+   * provider's extra finalize permissions for this call only.
+   */
+  finalize?(request: FinalizeRequest, options?: SupervisorCallOptions): Promise<FinalizeResult>;
 }
+
+export const FINALIZE_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    summary: { type: 'string' },
+    files: { type: 'array', items: { type: 'string' } }
+  },
+  required: ['summary', 'files'],
+  additionalProperties: false
+} as const;
 
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -172,5 +200,34 @@ export function buildInteractionPrompt(req: InteractionRequest): string {
     ``,
     `## Human message`,
     req.content
+  ].join('\n');
+}
+
+export function buildFinalizePrompt(req: FinalizeRequest, maxOutputChars: number): string {
+  const plan = req.plan.flatMap((s) => [
+    `- session ${s.id}${s.title ? ` — ${s.title}` : ''}`,
+    ...s.missions.map((m) => `  - [${m.status}] ${m.id} — ${m.title}`)
+  ]);
+  const inputs = req.inputs.flatMap((i) => [
+    `### ${i.missionId} — ${i.title}`,
+    ...(i.output !== undefined
+      ? [`Structured output "${i.outputName}" (also in ${i.outputPath}):`, '```json', truncate(JSON.stringify(i.output, null, 2), maxOutputChars), '```']
+      : [`No structured output; last worker report:`, truncate(i.lastReport ?? '(none)', maxOutputChars)]),
+    ''
+  ]);
+  return [
+    `# ColdPrompt plan finalize: ${req.project}`,
+    'Every mission of the plan is complete. This is not a turn review: there is no worker to instruct.',
+    'For this call only you have the extra permissions the user configured for finalize; use them only for the instructions below.',
+    `Relative paths are relative to ${req.configDirectory}.`,
+    '',
+    '## Plan',
+    ...plan,
+    '',
+    ...(inputs.length ? ['## Inputs', ...inputs] : []),
+    '## Instructions from the user',
+    req.prompt.trim(),
+    '',
+    'When done, return JSON: summary = what you did and its outcome (say plainly what failed), files = every file you wrote.'
   ].join('\n');
 }

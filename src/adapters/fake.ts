@@ -1,5 +1,5 @@
-import type { InteractionResult, ProbeResult, Review } from '../types.js';
-import type { EvaluationContext, InteractionRequest, SupervisorAdapter, SupervisorCallOptions } from '../supervisor.js';
+import type { FinalizeResult, InteractionResult, ProbeResult, Review } from '../types.js';
+import type { EvaluationContext, FinalizeRequest, InteractionRequest, SupervisorAdapter, SupervisorCallOptions } from '../supervisor.js';
 import type { ExecuteTurnOptions, WorkerAdapter, WorkerSessionOptions, WorkerTurnResult } from '../worker.js';
 
 export type FakeWorkerStep =
@@ -85,6 +85,8 @@ export class FakeSupervisorAdapter implements SupervisorAdapter {
   readonly provider = 'fake-supervisor';
   /** Unset by default (no model check); tests assign one to script it. */
   probe?: (workingDirectory: string, signal?: AbortSignal) => Promise<ProbeResult>;
+  /** Unset by default (the plan's finalize then fails); tests assign one to script it. */
+  finalize?: (request: FinalizeRequest, options?: SupervisorCallOptions) => Promise<FinalizeResult>;
   readonly evaluations: EvaluationContext[] = [];
   readonly interactions: InteractionRequest[] = [];
   concurrentWriterDetected = false;

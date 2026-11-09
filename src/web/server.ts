@@ -1,7 +1,9 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
-import { readFile, writeFile, chmod } from 'node:fs/promises';
+import { readFile, writeFile, chmod, mkdir, readdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import { loadSessionFile } from '../config.js';
+import { errorMessage } from '../errors.js';
 import { ConsoleClient } from '../console/client.js';
 import type { ServerMessage } from '../console/protocol.js';
 import type { CommandRequest, CommandResponse, OrchestratorEvent } from '../orchestrator.js';
@@ -13,6 +15,16 @@ const ALLOWED_COMMANDS = new Set(['status', 'directives', 'ask', 'tell', 'approv
 const HISTORY_EVENTS = 400;
 const MAX_BODY_BYTES = 64 * 1024;
 const TURN_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const PROPOSAL_FILE = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,120}\.ya?ml$/;
+
+export interface ProposalOptions {
+  /** Absolute directory of proposed session files. */
+  directory: string;
+  /** Absolute directory "Accept" moves a file into (included by the plan). */
+  acceptInto: string;
+  /** Session and mission ids of the current plan (an accepted file must not reuse them). */
+  planIds: () => Promise<{ sessions: string[]; missions: string[] }>;
+}
 
 export interface WebServerOptions {
   store: Store;
@@ -23,6 +35,8 @@ export interface WebServerOptions {
   projectName: string;
   /** Starts the orchestrator when it is not running (e.g. `systemctl --user start coldprompt-run`). */
   startRun?: () => Promise<{ ok: boolean; message: string }>;
+  /** Proposed sessions the user can accept into the plan or dismiss. */
+  proposals?: ProposalOptions;
   log?: (message: string) => void;
   /** Reconnect delay to the orchestrator socket. */
   reconnectMs?: number;
@@ -202,6 +216,7 @@ export class WebServer {
       try { result = await this.options.startRun(); } finally { this.starting = false; }
       return this.json(res, result.ok ? 200 : 500, { ok: result.ok, data: { message: result.message }, error: result.ok ? undefined : result.message });
     }
+    if (path.startsWith('/api/proposals')) return this.proposalsApi(req, res, path);
     const turn = /^\/api\/turn\/([^/]+)$/.exec(path);
     if (req.method === 'GET' && turn) {
       const id = decodeURIComponent(turn[1]);
@@ -229,6 +244,72 @@ export class WebServer {
       });
     }
     return this.json(res, 404, { ok: false, error: 'Not found' });
+  }
+
+  // -------------------------------------------------------------------------
+  // Proposed sessions
+
+  private async proposalsApi(req: IncomingMessage, res: ServerResponse, path: string): Promise<void> {
+    const p = this.options.proposals;
+    if (!p) return this.json(res, 501, { ok: false, error: 'No proposals directory configured (proposals: in coldprompt.yaml)' });
+    if (req.method === 'GET' && path === '/api/proposals') return this.json(res, 200, { ok: true, data: await this.listProposals(p) });
+    const action = /^\/api\/proposals\/(accept|dismiss)$/.exec(path);
+    if (req.method !== 'POST' || !action) return this.json(res, 404, { ok: false, error: 'Not found' });
+    const body = await this.body(req, res);
+    if (!body) return;
+    const file = typeof body.file === 'string' ? body.file : '';
+    if (!PROPOSAL_FILE.test(file)) return this.json(res, 400, { ok: false, error: 'Invalid file name' });
+    const source = join(p.directory, file);
+    if (!(await exists(source))) return this.json(res, 404, { ok: false, error: `No proposed session ${file}` });
+    if (action[1] === 'dismiss') {
+      const target = join(p.directory, 'dismissed', file);
+      await mkdir(join(p.directory, 'dismissed'), { recursive: true });
+      await rename(source, target);
+      this.options.log?.(`web: proposal ${file} dismissed`);
+      return this.json(res, 200, { ok: true, data: { message: `${file} dismissed (moved to dismissed/)` } });
+    }
+    let session;
+    try { session = await loadSessionFile(source); } catch (error) {
+      return this.json(res, 422, { ok: false, error: errorMessage(error) });
+    }
+    let ids;
+    try { ids = await p.planIds(); } catch (error) {
+      return this.json(res, 409, { ok: false, error: `The current plan does not load, fix it first: ${errorMessage(error)}` });
+    }
+    const clash = [
+      ...(ids.sessions.includes(session.id) ? [`session ${session.id}`] : []),
+      ...session.missions.filter((m) => ids.missions.includes(m.id)).map((m) => `mission ${m.id}`)
+    ];
+    if (clash.length) return this.json(res, 409, { ok: false, error: `Already in the plan: ${clash.join(', ')}` });
+    const target = join(p.acceptInto, file);
+    if (await exists(target)) return this.json(res, 409, { ok: false, error: `${file} already exists in ${p.acceptInto}` });
+    await mkdir(p.acceptInto, { recursive: true });
+    await rename(source, target);
+    this.options.log?.(`web: proposal ${file} accepted into the plan`);
+    return this.json(res, 200, {
+      ok: true,
+      data: { message: `${session.id} accepted into the plan${this.connected ? '; it runs after the current plan, from the next Start run' : '; press Start run to run it'}` }
+    });
+  }
+
+  private async listProposals(p: ProposalOptions): Promise<{ items: unknown[]; notes: Array<{ file: string; text: string }> }> {
+    let names: string[] = [];
+    try { names = (await readdir(p.directory)).sort(); } catch { /* none yet */ }
+    const items = [];
+    for (const file of names.filter((n) => PROPOSAL_FILE.test(n))) {
+      try {
+        const s = await loadSessionFile(join(p.directory, file));
+        items.push({ file, id: s.id, title: s.title ?? null, missions: s.missions.map((m) => ({ id: m.id, title: m.title, readOnly: m.execution.readOnly, requireHumanApproval: m.requireHumanApproval ?? null })) });
+      } catch (error) {
+        items.push({ file, error: errorMessage(error) });
+      }
+    }
+    // Markdown notes next to the proposals (e.g. the finalize summary), size-capped.
+    const notes = [];
+    for (const file of names.filter((n) => /^[A-Za-z0-9_][A-Za-z0-9_.-]*\.md$/.test(n)).slice(0, 5)) {
+      try { notes.push({ file, text: (await readFile(join(p.directory, file), 'utf8')).slice(0, 20_000) }); } catch { /* skip */ }
+    }
+    return { items, notes };
   }
 
   private asset(res: ServerResponse, body: string, type: string): void {
@@ -267,7 +348,7 @@ export class WebServer {
     res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no', Connection: 'keep-alive' });
     const events = await this.options.store.readEvents().catch(() => []);
     const history = events.slice(-HISTORY_EVENTS).map((e) => ({ type: e.type, data: e.data, at: e.timestamp }));
-    this.write(res, 'hello', { project: this.options.projectName, connected: this.connected, canStart: Boolean(this.options.startRun), status: this.status ?? null, history });
+    this.write(res, 'hello', { project: this.options.projectName, connected: this.connected, canStart: Boolean(this.options.startRun), proposals: Boolean(this.options.proposals), status: this.status ?? null, history });
     this.streams.add(res);
     res.on('close', () => this.streams.delete(res));
   }
@@ -282,3 +363,7 @@ export class WebServer {
 }
 
 export type { OrchestratorEvent };
+
+async function exists(path: string): Promise<boolean> {
+  try { await stat(path); return true; } catch { return false; }
+}
