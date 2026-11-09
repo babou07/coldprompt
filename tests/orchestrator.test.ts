@@ -330,7 +330,6 @@ test('handoff: previous gives a session the worker reports of the previous sessi
     { id: 's3', missions: [plainMission('d')] }
   ] });
   const h = await start(home, work, config, worker, supervisor);
-  await approveTransitions(h, 2);
   await h.done;
   assert.equal((await h.store.load()).status, 'COMPLETED');
   assert.doesNotMatch(worker.turnInputs[2], /Handoff/, 'missions inside a session share the thread: no handoff');
@@ -346,7 +345,6 @@ test('handoff keeps the most recent reports within the size budget', () => withD
   const supervisor = new FakeSupervisorAdapter([{ decision: 'CONTINUE', workerInstruction: 'go on' }, { decision: 'MISSION_COMPLETE' }, { decision: 'MISSION_COMPLETE' }]);
   const config = makeConfig({ sessions: [{ id: 's1', missions: [plainMission('a')] }, { id: 's2', handoff: 'previous', missions: [plainMission('b')] }] });
   const h = await start(home, work, config, worker, supervisor);
-  await approveTransitions(h, 1);
   await h.done;
   const prompt = worker.turnInputs[2];
   assert.match(prompt, /1 older report\(s\) omitted/);
@@ -375,14 +373,14 @@ test('sessions: missions of a session share one thread, each session gets a new 
         { id: 'a', title: 'A', prompt: { type: 'COLD_PROMPT', content: 'Do A' } },
         { id: 'b', title: 'B', prompt: { type: 'COLD_PROMPT', content: 'Do B' } }
       ] },
-      // requireHumanApproval: false cannot skip the approval at a session boundary.
+      // The end of s1 waits for a human (mission b asks for it); the rest is automatic.
       { id: 's2', missions: [{ id: 'audit', title: 'Audit', prompt: { type: 'COLD_PROMPT', content: 'Audit' }, execution: { readOnly: true } }] }
     ]
   });
-  config.missions[1].requireHumanApproval = false;
+  config.missions[1].requireHumanApproval = true;
   const worker = new FakeWorkerAdapter();
   const h = await start(home, work, config, worker, new FakeSupervisorAdapter());
-  // a -> b inside s1: no approval (runtime flag false in tests).
+  // a -> b inside s1: no approval (autoApproveMissions in tests).
   await waitFor(() => h.orchestrator.snapshotState.blocked?.kind === 'MISSION_APPROVAL');
   assert.equal(h.orchestrator.snapshotState.missionIndex, 1, 'blocked at the end of s1, after b');
   assert.match(h.orchestrator.snapshotState.blocked!.reason, /ends session s1[\s\S]*session s2 on a new worker thread/);
@@ -408,7 +406,7 @@ test('sessions: missions of a session share one thread, each session gets a new 
 }));
 
 test('dry-run (autoApproveTransitions) crosses session boundaries without approval', () => withDirs(async (home, work) => {
-  const config = makeConfig({ runtime: { requireHumanApprovalForMissionTransition: true }, sessions: [
+  const config = makeConfig({ runtime: { autoApproveMissions: false }, sessions: [
     { id: 's1', missions: [plainMission('a')] }, { id: 's2', missions: [plainMission('b')] }
   ] });
   const h = await start(home, work, config, new FakeWorkerAdapter(), new FakeSupervisorAdapter(), { autoApproveTransitions: true });
@@ -416,12 +414,44 @@ test('dry-run (autoApproveTransitions) crosses session boundaries without approv
   assert.equal((await h.store.load()).status, 'COMPLETED');
 }));
 
-test('requireHumanApprovalForMissionTransition gates transitions inside a session too', () => withDirs(async (home, work) => {
-  const config = makeConfig({ runtime: { requireHumanApprovalForMissionTransition: true }, missions: [plainMission('a'), plainMission('b')] });
+test('autoApproveMissions false (default) waits for a human at every mission end, inside a session too', () => withDirs(async (home, work) => {
+  const config = makeConfig({ runtime: { autoApproveMissions: false }, missions: [plainMission('a'), plainMission('b')] });
   const h = await start(home, work, config, new FakeWorkerAdapter(), new FakeSupervisorAdapter());
   await waitFor(() => h.orchestrator.snapshotState.blocked?.kind === 'MISSION_APPROVAL');
   assert.doesNotMatch(h.orchestrator.snapshotState.blocked!.reason, /ends session/);
   await approveTransitions(h, 2);
+  await h.done;
+  assert.equal((await h.store.load()).status, 'COMPLETED');
+}));
+
+test('autoApproveMissions true: completed missions move on, across sessions too; real blocks still stop the run', () => withDirs(async (home, work) => {
+  const config = makeConfig({ runtime: { autoApproveMissions: true }, sessions: [
+    { id: 's1', missions: [plainMission('a'), plainMission('b')] },
+    { id: 's2', missions: [plainMission('c')] }
+  ] });
+  const supervisor = new FakeSupervisorAdapter([
+    { decision: 'MISSION_COMPLETE' }, { decision: 'MISSION_COMPLETE' },
+    { decision: 'BLOCKED', reason: 'KiCad IPC unreachable' }, { decision: 'MISSION_COMPLETE' }
+  ]);
+  const worker = new FakeWorkerAdapter();
+  const h = await start(home, work, config, worker, supervisor);
+  await waitFor(() => h.orchestrator.snapshotState.status === 'BLOCKED');
+  assert.equal(h.orchestrator.snapshotState.blocked!.kind, 'SUPERVISOR', 'a supervisor block is not auto-approved');
+  assert.equal(h.orchestrator.snapshotState.activeMissionId, 'c', 'a, b and the s1 -> s2 boundary went by without a human');
+  assert.equal((await h.orchestrator.handleCommand({ command: 'resume', text: 'KiCad is open now' })).ok, true);
+  await h.done;
+  assert.equal((await h.store.load()).status, 'COMPLETED');
+  const auto = (await h.store.readEvents()).filter((e) => e.type === 'mission.auto_approved');
+  assert.deepEqual(auto.map((e) => [e.data.missionId, e.data.nextSessionId]), [['a', undefined], ['b', 's2'], ['c', undefined]]);
+}));
+
+test('autoApproveMissions: a mission with requireHumanApproval: true still waits for a human', () => withDirs(async (home, work) => {
+  const config = makeConfig({ runtime: { autoApproveMissions: true }, missions: [plainMission('a'), plainMission('b')] });
+  config.missions[0].requireHumanApproval = true;
+  const h = await start(home, work, config, new FakeWorkerAdapter(), new FakeSupervisorAdapter());
+  await waitFor(() => h.orchestrator.snapshotState.blocked?.kind === 'MISSION_APPROVAL');
+  assert.equal(h.orchestrator.snapshotState.activeMissionId, 'a');
+  await approveTransitions(h, 1);
   await h.done;
   assert.equal((await h.store.load()).status, 'COMPLETED');
 }));
@@ -459,7 +489,6 @@ test('resumeThread continues an existing Codex thread; CODEX_THREAD_ID is ignore
       { id: 'fresh', missions: [plainMission('b')] }
     ] });
     const h = await start(home, work, config, worker, new FakeSupervisorAdapter());
-    await approveTransitions(h, 1);
     await h.done;
     assert.deepEqual(worker.calls.slice(0, 2).map((c) => [c.kind, c.sessionId]), [['resume', 'thread-existing'], ['turn', 'thread-existing']]);
     assert.equal(worker.calls[2].kind, 'start', 'the next session starts a new thread');

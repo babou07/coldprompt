@@ -34,6 +34,7 @@ export const missionSchema = z.object({
   }).strict().default({}),
   /** Names of verifications (commands or plugins) required for this mission. Default: all. */
   verification: z.array(z.string()).optional(),
+  /** Overrides runtime.autoApproveMissions for this mission: true always waits for a human, false never does. */
   requireHumanApproval: z.boolean().optional()
 });
 
@@ -143,9 +144,15 @@ const baseConfigShape = {
     retryDelaysSeconds: z.array(z.number().nonnegative()),
     sessionLockRetryDelaysSeconds: z.array(z.number().nonnegative()).default([5, 15, 30, 60]),
     verifyGitCleanOnCompletion: z.boolean(),
-    requireHumanApprovalForMissionTransition: z.boolean(),
+    /**
+     * true: a mission the supervisor declares complete (and that passes its
+     * checks) moves on without a human, also into the next session. Real
+     * blocks still stop the run. false (default): every mission end waits
+     * for "approve mission".
+     */
+    autoApproveMissions: z.boolean().default(false),
     maxWorkerOutputChars: z.number().int().positive().default(20000)
-  }),
+  }).strict(),
   verification: z.object({
     commands: z.array(verificationCommandSchema).default([]),
     plugins: z.array(verificationPluginSchema).default([])

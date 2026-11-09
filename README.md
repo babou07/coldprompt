@@ -12,9 +12,10 @@ persistent coding agents.
   worker thread** (same worker context: a Codex thread or a Claude
   conversation). `coldprompt.yaml` (the plan) holds the
   shared settings and lists the session files, run in order. Each session
-  starts a new thread unless it sets `resumeThread:`; moving to the next
-  session always waits for `approve mission`. One supervisor conversation
-  spans the whole plan.
+  starts a new thread unless it sets `resumeThread:`. By default every
+  mission end, and so every move to the next session, waits for
+  `approve mission` (see [Approvals](#approvals)). One supervisor
+  conversation spans the whole plan.
 - `HOT_PROMPT`: a question, directive or resolution injected at runtime.
 - A supervisor agent reviews every worker turn and decides whether the
   mission continues, needs evidence, is blocked or is complete. Worker and
@@ -171,6 +172,22 @@ session may use another worker provider.
 `coldprompt doctor` checks the CLIs of the configured providers. New
 providers plug in through `src/adapters/registry.ts` (see
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
+
+### Approvals
+
+    runtime:
+      autoApproveMissions: false    # default
+
+- `false` (default): when the supervisor declares a mission complete and
+  its checks pass, the run waits for `approve mission` (web console:
+  **Approve session N, mission M**). This is also when the next session,
+  and its new worker thread, would start.
+- `true`: such missions move on by themselves, into the next session too.
+  The event log records `mission.auto_approved`. Everything else still
+  stops the run as usual: a supervisor `BLOCKED` or `STOP`, failed checks,
+  limits, provider errors, an ambiguous turn after a crash.
+- A mission can override it: `requireHumanApproval: true` always waits for
+  a human, `false` never does.
 
 ### Console commands
 

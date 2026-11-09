@@ -121,9 +121,11 @@ even an interrupted first turn keeps its thread.
   session. One session = one Codex thread, recorded in
   `state.sessions[<id>].workerThreadId`. A session starts a new thread unless
   its file sets `resumeThread`; environment variables are never used (a stale
-  `CODEX_THREAD_ID` once resumed an unrelated 1 400-turn thread). A transition
-  that leaves a session always blocks with `MISSION_APPROVAL`, whatever
-  `requireHumanApproval` says. One Claude conversation spans all sessions.
+  `CODEX_THREAD_ID` once resumed an unrelated 1 400-turn thread). A completed
+  mission blocks with `MISSION_APPROVAL` unless `runtime.autoApproveMissions`
+  (default false) or its own `requireHumanApproval: false` says otherwise;
+  with auto-approval this includes leaving a session (`mission.auto_approved`
+  event). One supervisor conversation spans all sessions.
   A mission moved to another session after it started is refused at start-up.
 - **Handoff.** Sessions share context only through an explicit handoff:
   `handoff: previous` in a session file adds the previous session's worker

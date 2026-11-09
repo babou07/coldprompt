@@ -82,6 +82,7 @@ export const APP_CSS = `
 :root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--muted:#6b7385;--line:#e2e5ea;--accent:#2f6fde;--ok:#1f8a4c;--warn:#b7791f;--bad:#c53030;--code:#f0f2f5}
 @media (prefers-color-scheme:dark){:root{--bg:#0f1218;--card:#181c24;--fg:#e6e9ef;--muted:#8f97a8;--line:#2a303b;--accent:#6aa0ff;--ok:#4cc38a;--warn:#e0a84f;--bad:#f06a6a;--code:#11151c}}
 *{box-sizing:border-box}
+[hidden]{display:none !important}
 html,body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.45 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 body{display:flex;flex-direction:column;min-height:100vh;padding-bottom:calc(150px + env(safe-area-inset-bottom))}
 header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:10px 14px}
@@ -170,8 +171,11 @@ const KEY = 'coldprompt-web-token';
 const PANEL_KEY = 'coldprompt-web-panel';
 let token = '';
 try { token = localStorage.getItem(KEY) || ''; } catch {}
-const fromHash = new URLSearchParams(location.hash.slice(1)).get('token');
-if (fromHash) { token = fromHash; try { localStorage.setItem(KEY, token); } catch {} history.replaceState(null, '', location.pathname); }
+// A link like https://host/#token=... signs in at once. Whitespace slipped in
+// by copy-paste is removed (tokens never contain any).
+const fromHash = (new URLSearchParams(location.hash.slice(1)).get('token') || '').replace(/\s+/g, '');
+if (fromHash) { token = fromHash; try { localStorage.setItem(KEY, token); } catch {} }
+if (location.hash) history.replaceState(null, '', location.pathname);
 
 let mode = 'ask';
 let status = null;
@@ -188,15 +192,18 @@ async function api(path, body) {
     headers: Object.assign({ Authorization: 'Bearer ' + token }, body ? { 'Content-Type': 'application/json' } : {}),
     body: body ? JSON.stringify(body) : undefined
   });
-  if (res.status === 401) { logout(); throw new Error('Unauthorized'); }
+  if (res.status === 401) { logout(token); throw new Error('Unauthorized'); }
   return res.json();
 }
 
-function logout() {
+/** Shows the sign-in form; 'refused' (a token the server rejected) is put back in the field. */
+function logout(refused) {
   try { localStorage.removeItem(KEY); } catch {}
   token = '';
   if (streamAbort) streamAbort.abort();
   $('#login').hidden = false;
+  $('#token').value = refused || '';
+  if (refused) toast('Token refused: check it, then Connect', true);
 }
 
 function toast(text, isError) {
@@ -223,7 +230,7 @@ async function stream() {
     streamAbort = new AbortController();
     try {
       const res = await fetch('/api/stream', { headers: { Authorization: 'Bearer ' + token }, signal: streamAbort.signal });
-      if (res.status === 401) { logout(); return; }
+      if (res.status === 401) { logout(token); return; }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';

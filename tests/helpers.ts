@@ -37,7 +37,7 @@ export function makeConfig(overrides: Record<string, any> = {}): Config {
       statusEvery: 100,
       retryDelaysSeconds: [30, 60, 120, 240],
       verifyGitCleanOnCompletion: false,
-      requireHumanApprovalForMissionTransition: false,
+      autoApproveMissions: true,
       ...runtime
     },
     sessions: sessions ?? [{

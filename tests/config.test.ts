@@ -4,7 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configSchema } from '../src/types.js';
 import { loadConfig } from '../src/config.js';
-import { tempDir } from './helpers.js';
+import { makeConfig, tempDir } from './helpers.js';
 
 const base = {
   version: 1,
@@ -17,7 +17,7 @@ const base = {
     statusEvery: 1,
     retryDelaysSeconds: [30],
     verifyGitCleanOnCompletion: true,
-    requireHumanApprovalForMissionTransition: false
+    autoApproveMissions: false
   },
   sessions: [{
     id: 'main',
@@ -112,7 +112,7 @@ const planYaml = (sessions: string[]) => [
   'project: { name: t, workingDirectory: . }',
   'worker: { provider: codex }',
   'supervisor: { provider: claude }',
-  'runtime: { maxTurns: 5, maxHours: 1, statusEvery: 1, retryDelaysSeconds: [1], verifyGitCleanOnCompletion: false, requireHumanApprovalForMissionTransition: false }',
+  'runtime: { maxTurns: 5, maxHours: 1, statusEvery: 1, retryDelaysSeconds: [1], verifyGitCleanOnCompletion: false, autoApproveMissions: false }',
   'sessions:',
   ...sessions.map((f) => `  - ${f}`)
 ].join('\n') + '\n';
@@ -158,4 +158,17 @@ test('loadConfig: clear errors for missions in coldprompt.yaml, bad session file
 test('the example coldprompt.example.yaml is valid', async () => {
   const config = await loadConfig(new URL('../coldprompt.example.yaml', import.meta.url).pathname);
   assert.ok(config.missions.length >= 1);
+});
+
+test('autoApproveMissions defaults to false; the old approval key is refused with a hint', async () => {
+  assert.equal(makeConfig({ runtime: { autoApproveMissions: undefined } }).runtime.autoApproveMissions, false);
+  const dir = await tempDir();
+  try {
+    await mkdir(join(dir.path, 'sessions'));
+    await writeFile(join(dir.path, 'sessions', 'one.yaml'), 'id: one\nmissions:\n  - { id: a, title: A, prompt: { type: COLD_PROMPT, content: x } }\n');
+    await writeFile(join(dir.path, 'coldprompt.yaml'), planYaml(['sessions/one.yaml']).replace('autoApproveMissions: false', 'requireHumanApprovalForMissionTransition: true'));
+    await assert.rejects(loadConfig(join(dir.path, 'coldprompt.yaml')), /requireHumanApprovalForMissionTransition was replaced by runtime\.autoApproveMissions/);
+  } finally {
+    await dir.cleanup();
+  }
 });

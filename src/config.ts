@@ -34,7 +34,12 @@ export async function loadConfig(path: string): Promise<Config> {
       'Move them to e.g. sessions/main.yaml (with an "id:" and a "missions:" list) and list that file under "sessions:".');
   }
   const plan = planSchema.safeParse(raw);
-  if (!plan.success) throw new ColdPromptError('INVALID_CONFIG', `Invalid configuration ${path}:\n${formatIssues(plan.error.issues)}`);
+  if (!plan.success) {
+    const renamed = plan.error.issues.some((i) => i.code === 'unrecognized_keys' && i.keys.includes('requireHumanApprovalForMissionTransition'))
+      ? '\n  (requireHumanApprovalForMissionTransition was replaced by runtime.autoApproveMissions, default false: every mission end waits for "approve mission")'
+      : '';
+    throw new ColdPromptError('INVALID_CONFIG', `Invalid configuration ${path}:\n${formatIssues(plan.error.issues)}${renamed}`);
+  }
 
   const base = dirname(resolve(path));
   const sessions: unknown[] = [];

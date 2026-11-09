@@ -49,8 +49,10 @@ Missions are never declared directly in coldprompt.yaml.
 
 - A new session always starts a new Codex thread, unless the
   session file sets `resumeThread:` to an existing thread id.
-- Moving from one session to the next always requires explicit
-  human approval.
+- Moving from one mission (or session) to the next requires
+  explicit human approval, unless the plan sets
+  runtime.autoApproveMissions: true (default false). Auto-approval
+  never skips any other block.
 - Context passes between sessions only through an explicit
   handoff (worker reports of the previous session).
 - One single Claude supervisor conversation spans the whole plan.

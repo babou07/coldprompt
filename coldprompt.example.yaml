@@ -32,7 +32,10 @@ runtime:
   statusEvery: 3
   retryDelaysSeconds: [30, 60, 120, 240]
   verifyGitCleanOnCompletion: true
-  requireHumanApprovalForMissionTransition: false
+  # false (default): every mission end waits for "approve mission".
+  # true: missions the supervisor completes move on by themselves, also into
+  # the next session; real blocks still stop the run.
+  autoApproveMissions: false
   # sessionLockRetryDelaysSeconds: [5, 15, 30, 60]
 
 # Deterministic checks. `completion` checks gate MISSION_COMPLETE;

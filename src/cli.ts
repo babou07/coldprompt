@@ -138,7 +138,7 @@ async function run(dryRun: boolean): Promise<number> {
     });
     const supervisor = new FakeSupervisorAdapter([], [], { decision: 'MISSION_COMPLETE', reason: 'dry-run', workerInstruction: '' });
     orchestrator = new Orchestrator({
-      config: { ...config, runtime: { ...config.runtime, verifyGitCleanOnCompletion: false, requireHumanApprovalForMissionTransition: false } },
+      config: { ...config, runtime: { ...config.runtime, verifyGitCleanOnCompletion: false, autoApproveMissions: true } },
       store: orchestratorStore, worker, supervisor, workingDirectory: workdir, verifiers: [], log,
       autoApproveTransitions: true
     });

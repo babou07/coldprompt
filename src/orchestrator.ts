@@ -816,15 +816,20 @@ export class Orchestrator {
     }
     const next = this.config.missions[this.config.missions.indexOf(mission) + 1];
     const endsSession = next !== undefined && next.session !== mission.session;
-    // Leaving a session (and its worker thread) always needs a human.
+    // A human approves every mission end, unless autoApproveMissions (or the
+    // mission's own requireHumanApproval) says otherwise. Dry-runs never wait.
     const needsApproval = !this.options.autoApproveTransitions
-      && (endsSession || (mission.requireHumanApproval ?? this.config.runtime.requireHumanApprovalForMissionTransition));
+      && (mission.requireHumanApproval ?? !this.config.runtime.autoApproveMissions);
     if (needsApproval) {
       return this.enterBlocked('MISSION_APPROVAL',
         endsSession
           ? `Mission ${mission.id} passed verification; it ends session ${mission.session}. Human approval required: "approve mission" to start session ${next.session} on a new worker thread, or "resume <instruction>" to keep working on ${mission.id}.`
           : `Mission ${mission.id} passed verification. Human approval required: "approve mission" to advance, or "resume <instruction>" to keep working on it.`,
         pending.turnId, 'BLOCKED', (s) => { s.pendingTurn = undefined; });
+    }
+    if (!this.options.autoApproveTransitions) {
+      this.log(`mission ${mission.id} approved automatically (no human approval required)${endsSession ? `; session ${next.session} starts on a new worker thread` : ''}`);
+      await this.emit('mission.auto_approved', { missionId: mission.id, sessionId: mission.session, nextSessionId: endsSession ? next.session : undefined });
     }
     await this.completeMission(mission, (s) => { s.pendingTurn = undefined; });
   }
