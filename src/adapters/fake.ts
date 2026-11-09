@@ -1,4 +1,4 @@
-import type { InteractionResult, Review } from '../types.js';
+import type { InteractionResult, ProbeResult, Review } from '../types.js';
 import type { EvaluationContext, InteractionRequest, SupervisorAdapter, SupervisorCallOptions } from '../supervisor.js';
 import type { ExecuteTurnOptions, WorkerAdapter, WorkerSessionOptions, WorkerTurnResult } from '../worker.js';
 
@@ -14,6 +14,8 @@ export type FakeWorkerStep =
  */
 export class FakeWorkerAdapter implements WorkerAdapter {
   readonly provider = 'fake-worker';
+  /** Unset by default (no model check); tests assign one to script it. */
+  probe?: (workingDirectory: string, signal?: AbortSignal) => Promise<ProbeResult>;
   readonly calls: Array<{ kind: 'start' | 'resume' | 'turn' | 'cancel'; sessionId?: string; input?: string; readOnly?: boolean }> = [];
   private sessionId: string | undefined;
   private pendingNew = false;
@@ -81,6 +83,8 @@ export type FakeInteractionStep = Partial<InteractionResult> | ((req: Interactio
 /** Scripted supervisor that also detects concurrent conversation writers. */
 export class FakeSupervisorAdapter implements SupervisorAdapter {
   readonly provider = 'fake-supervisor';
+  /** Unset by default (no model check); tests assign one to script it. */
+  probe?: (workingDirectory: string, signal?: AbortSignal) => Promise<ProbeResult>;
   readonly evaluations: EvaluationContext[] = [];
   readonly interactions: InteractionRequest[] = [];
   concurrentWriterDetected = false;

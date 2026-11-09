@@ -1,12 +1,18 @@
+# Example plan. Copy it next to your project as coldprompt.yaml and adapt it:
+#   cp coldprompt.example.yaml /path/to/work/coldprompt.yaml
 version: 1
 
 project:
   name: coldprompt-example
   workingDirectory: .
 
+# worker and supervisor: provider codex or claude, in any combination
+# (README, "Providers"). Each provider has its own options.
+# model: null (or absent) = the provider's default model. Each run checks
+# both models before the first worker turn; an unusable one blocks the run.
 worker:
   provider: codex
-  model: null
+  model: null                       # or a model id offered by your codex CLI (/model)
   # sandboxMode / approvalPolicy are inherited from your Codex config when unset.
   # sandboxMode: workspace-write
   # The SDK bundles its own (older) codex binary; point to yours so your
@@ -15,7 +21,7 @@ worker:
 
 supervisor:
   provider: claude
-  model: null
+  model: null                       # e.g. opus, sonnet, haiku or a full model id
   # tools: [Read, Grep, Glob]       # supervisor tools (read-only by default)
   # permissionMode: dontAsk
   # timeoutSeconds: 900

@@ -1,3 +1,5 @@
+import type { ProbeResult } from './types.js';
+
 export interface WorkerSessionOptions {
   workingDirectory: string;
   /** Read-only sandbox for this session (independent audits, analysis missions). */
@@ -51,4 +53,9 @@ export interface WorkerAdapter {
   /** Aborts the active turn, if any. Never kills foreign processes. */
   cancel(): Promise<void>;
   getSessionId(): string | undefined;
+  /**
+   * Optional: a cheap call proving that the configured model answers (run
+   * start). Throws with the provider's message when it does not.
+   */
+  probe?(workingDirectory: string, signal?: AbortSignal): Promise<ProbeResult>;
 }

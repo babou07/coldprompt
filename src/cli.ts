@@ -10,8 +10,7 @@ import { Orchestrator, HELP_TEXT } from './orchestrator.js';
 import { snapshot } from './git.js';
 import { buildVerifiers, configDirectoryOf, readOnlyCompletionChecks } from './verification.js';
 import { ColdPromptError, errorMessage, redact } from './errors.js';
-import { CodexWorkerAdapter } from './adapters/codex.js';
-import { ClaudeSupervisorAdapter } from './adapters/claude.js';
+import { checkProviders, createSupervisor, createWorker, type ProviderContext } from './adapters/registry.js';
 import { FakeSupervisorAdapter, FakeWorkerAdapter } from './adapters/fake.js';
 import { ConsoleServer } from './console/server.js';
 import { formatStatus, runInteractiveConsole, sendOnce } from './console/client.js';
@@ -22,29 +21,22 @@ import { findOnPath, renderUnits } from './web/systemd.js';
 
 const exec = promisify(execFile);
 
-/** Mirrors @openai/codex-sdk's default binary resolution (vendored per platform). */
-function bundledCodexPath(): string {
-  const triple = `${process.arch === 'arm64' ? 'aarch64' : 'x86_64'}-unknown-linux-musl`;
-  const sdkEntry = fileURLToPath(import.meta.resolve('@openai/codex-sdk'));
-  return join(dirname(sdkEntry), '..', 'vendor', triple, 'codex', 'codex');
-}
-
 const USAGE = `Usage: coldprompt <command>
 
   run [--dry-run]     Run the mission queue (owner process; starts the console socket)
   console             Interactive console (connects to the running orchestrator)
   send <command...>   Send one console command, e.g. send ask "why blocked?"
   status              Live status if running, otherwise the persisted state
-  doctor              Validate config, Claude CLI options, Codex and repository
+  doctor              Validate config, worker and supervisor CLIs, repository
   events [n]          Print the last n events (default 20)
   web [--host H] [--port P] [--run-unit U]
-                      Web console (status, live Codex activity, HOT_PROMPTs);
+                      Web console (status, live worker activity, HOT_PROMPTs);
                       default 127.0.0.1:8787, token in <COLDPROMPT_HOME>/web-token
   systemd [--write]   Print (or write to ~/.config/systemd/user) units for run and web
 
 Environment: COLDPROMPT_CONFIG (coldprompt.yaml), COLDPROMPT_HOME (.coldprompt next to the config).
-A session file (listed under "sessions:" in coldprompt.yaml) is one Codex thread;
-set "resumeThread:" in it to continue an existing thread.
+A session file (listed under "sessions:" in coldprompt.yaml) is one worker thread
+(Codex thread or Claude conversation); set "resumeThread:" in it to continue one.
 
 Console commands:
 ${HELP_TEXT}`;
@@ -71,9 +63,15 @@ async function checkHomeLocation(config: Config, workdir: string): Promise<strin
   const rel = relative(workdir, home);
   if (rel.startsWith('..') || isAbsolute(rel)) return undefined;
   const git = await snapshot(workdir);
-  if (!git.isRepo || await isIgnored(workdir, home)) return undefined;
+  // Trailing slash: a ".coldprompt/" pattern only matches directories, and the
+  // state directory may not exist yet.
+  if (!git.isRepo || await isIgnored(workdir, `${home}/`)) return undefined;
   return `State directory ${home} is inside the target repository and not git-ignored`
     + (config.runtime.verifyGitCleanOnCompletion ? '; git-clean verification would always fail.' : '.');
+}
+
+function providerContext(config: Config, workdir: string): ProviderContext {
+  return { workingDirectory: workdir, maxWorkerOutputChars: config.runtime.maxWorkerOutputChars };
 }
 
 async function doctor(): Promise<number> {
@@ -96,23 +94,10 @@ async function doctor(): Promise<number> {
   if (git.operationInProgress) bad(`git ${git.operationInProgress} in progress`);
   const homeIssue = await checkHomeLocation(config, workdir);
   if (homeIssue) bad(homeIssue);
-  try {
-    const version = await new ClaudeSupervisorAdapter(config.supervisor, workdir).validateCli();
-    ok(`Claude CLI ${version}: required options present`);
-  } catch (error) {
-    bad(errorMessage(error));
-  }
-  const codexVersion = async (bin: string) => (await exec(bin, ['--version'])).stdout.trim();
-  const sdkBinary = config.worker.codexPath ?? bundledCodexPath();
-  try {
-    const used = await codexVersion(sdkBinary);
-    ok(`Codex used by the SDK: ${sdkBinary} (${used})${config.worker.sandboxMode ? `, sandbox ${config.worker.sandboxMode}` : ', sandbox inherited from your Codex config'}`);
-    const system = await codexVersion('codex').catch(() => undefined);
-    if (!config.worker.codexPath && system && system !== used) {
-      warn(`your PATH codex is ${system} but the SDK runs its bundled ${used}; set worker.codexPath to use yours (config compatibility, thread resume)`);
-    }
-  } catch (error) {
-    bad(`Codex CLI not runnable (${sdkBinary}): ${errorMessage(error)}`);
+  const model = (m: string | null | undefined) => (m ? `model ${m}` : 'default model');
+  ok(`worker: ${config.worker.provider} (${model(config.worker.model)}), supervisor: ${config.supervisor.provider} (${model(config.supervisor.model)}); models are checked when a run starts`);
+  for (const check of await checkProviders(config, providerContext(config, workdir))) {
+    (check.level === 'ok' ? ok : check.level === 'warn' ? warn : bad)(check.message);
   }
   try {
     await buildVerifiers(config, configDirectoryOf(configPath));
@@ -126,7 +111,7 @@ async function doctor(): Promise<number> {
   const state = await store.load().catch(() => undefined);
   for (const [index, session] of config.sessions.entries()) {
     const recorded = state?.sessions?.[session.id]?.workerThreadId;
-    const thread = recorded ? `Codex thread ${recorded}` : session.resumeThread ? `RESUMES existing Codex thread ${session.resumeThread}` : 'new Codex thread';
+    const thread = recorded ? `worker thread ${recorded}` : session.resumeThread ? `RESUMES existing worker thread ${session.resumeThread}` : 'new worker thread';
     ok(`session ${index + 1}/${config.sessions.length} ${session.id} (${session.file ?? 'inline'}): ${session.missions.length} mission(s) [${session.missions.map((m) => m.id).join(', ')}], ${thread}${session.handoff === 'previous' ? ', handoff from previous session' : ''}`);
   }
   if (process.env.CODEX_THREAD_ID) ok('CODEX_THREAD_ID is set in this environment; ColdPrompt ignores it (use resumeThread in a session file)');
@@ -160,9 +145,13 @@ async function run(dryRun: boolean): Promise<number> {
   } else {
     const homeIssue = await checkHomeLocation(config, workdir);
     if (homeIssue) throw new ColdPromptError('INVALID_CONFIG', `${homeIssue} Add it to .gitignore or set COLDPROMPT_HOME.`);
-    const supervisor = new ClaudeSupervisorAdapter(config.supervisor, workdir, undefined, config.runtime.maxWorkerOutputChars);
-    log(`Claude CLI ${await supervisor.validateCli()}`);
-    const worker = new CodexWorkerAdapter(config.worker);
+    const context = providerContext(config, workdir);
+    const checks = await checkProviders(config, context);
+    for (const check of checks) log(`${check.level === 'ok' ? '' : `${check.level}: `}${check.message}`);
+    const failed = checks.filter((c) => c.level === 'fail');
+    if (failed.length) throw new ColdPromptError('INVALID_CONFIG', failed.map((c) => c.message).join('; '));
+    const supervisor = createSupervisor(config.supervisor, context);
+    const worker = createWorker(config.worker, context);
     const verifiers = await buildVerifiers(config, configDirectoryOf(configPath));
     orchestrator = new Orchestrator({
       config, store, worker, supervisor, workingDirectory: workdir, verifiers, log

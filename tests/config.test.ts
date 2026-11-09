@@ -39,6 +39,9 @@ test('COLD_PROMPT is accepted', () => {
 
 test('defaults: sandbox inherited from the user Codex config, supervisor read-only tools', () => {
   const config = configSchema.parse(base);
+  assert.equal(config.worker.provider, 'codex');
+  assert.equal(config.supervisor.provider, 'claude');
+  if (config.worker.provider !== 'codex' || config.supervisor.provider !== 'claude') return;
   assert.equal(config.worker.sandboxMode, undefined);
   assert.equal(config.worker.approvalPolicy, undefined);
   assert.deepEqual(config.supervisor.tools, ['Read', 'Grep', 'Glob']);
@@ -152,7 +155,7 @@ test('loadConfig: clear errors for missions in coldprompt.yaml, bad session file
   }
 });
 
-test('the example coldprompt.yaml is valid', async () => {
-  const config = await loadConfig(new URL('../coldprompt.yaml', import.meta.url).pathname);
+test('the example coldprompt.example.yaml is valid', async () => {
+  const config = await loadConfig(new URL('../coldprompt.example.yaml', import.meta.url).pathname);
   assert.ok(config.missions.length >= 1);
 });

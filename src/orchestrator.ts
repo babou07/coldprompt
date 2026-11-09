@@ -134,6 +134,8 @@ export class Orchestrator {
   private runTurns = 0;
   private waitedMs = 0;
   private running = false;
+  /** Set once the worker and supervisor models answered during this run. */
+  private providersChecked = false;
   private readonly sleep: Sleep;
   private readonly now: () => number;
   private readonly verifiers: Verifier[];
@@ -160,11 +162,16 @@ export class Orchestrator {
     try {
       this.state = await this.store.load();
       this.checkConfigMatchesState();
+      this.checkProvidersMatchState();
       await this.adoptLegacyThread();
       if (this.state.supervisorSessionId) {
         await this.options.supervisor.resumeSession(this.state.supervisorSessionId, this.state.supervisorSessionStarted);
       }
       await this.recover();
+      if (this.state.status === 'BLOCKED' && this.state.blocked?.kind === 'PROVIDER_CHECK') {
+        // The check runs again on this start, with the configuration as it is now.
+        await this.mutate((s) => { s.status = 'RUNNING'; s.blocked = undefined; s.blockedReason = undefined; });
+      }
     } catch (error) {
       await this.store.releaseLock();
       throw error;
@@ -180,7 +187,31 @@ export class Orchestrator {
       if (!s.sessions[session]?.workerThreadId) s.sessions[session] = { ...(s.sessions[session] ?? {}), workerThreadId: legacy };
       s.legacyWorkerThreadId = undefined;
     });
-    this.log(`state upgraded: Codex thread ${legacy} assigned to session ${session}`);
+    this.log(`state upgraded: worker thread ${legacy} assigned to session ${session}`);
+  }
+
+  /**
+   * A thread id only means something to the provider that created it: refuse
+   * to hand a Codex thread to Claude (or the reverse) after a provider change.
+   * Ids recorded before providers were tracked are not checked.
+   */
+  private checkProvidersMatchState(): void {
+    const s = this.state;
+    const worker = this.options.worker.provider;
+    const supervisor = this.options.supervisor.provider;
+    const problems: string[] = [];
+    for (const [id, session] of Object.entries(s.sessions)) {
+      // Completed sessions are never resumed: the next session may use another provider.
+      if (session.workerThreadId && !session.completedAt && session.workerProvider && session.workerProvider !== worker) {
+        problems.push(`session "${id}" has a ${session.workerProvider} worker thread (${session.workerThreadId}) but the worker is now ${worker}`);
+      }
+    }
+    if (s.supervisorSessionId && s.supervisorProvider && s.supervisorProvider !== supervisor) {
+      problems.push(`the supervisor conversation ${s.supervisorSessionId} belongs to ${s.supervisorProvider} but the supervisor is now ${supervisor}`);
+    }
+    if (problems.length) {
+      throw new ColdPromptError('INVALID_CONFIG', `Provider changed under persisted state:\n  - ${problems.join('\n  - ')}\nSwitch the provider back, or start a fresh state (move the state directory away).`);
+    }
   }
 
   /** Refuses to continue when the mission list changed under persisted progress. */
@@ -233,6 +264,10 @@ export class Orchestrator {
           await this.emit('runtime.paused', {});
           continue;
         }
+        if (!this.providersChecked && !this.state.pendingTurn) {
+          await this.checkProviders();
+          continue;
+        }
         await this.step();
       }
       if (this.stopping) {
@@ -240,7 +275,7 @@ export class Orchestrator {
           if (s.status === 'RUNNING' || s.status === 'IDLE') s.status = 'STOPPED';
         });
       }
-      // Let in-flight supervisor conversations finish so Claude state stays consistent.
+      // Let in-flight supervisor conversations finish so supervisor state stays consistent.
       await this.questionPump;
       await this.supervisorLock.idle();
       await this.emit('run.finished', { status: this.state.status });
@@ -253,6 +288,41 @@ export class Orchestrator {
   async close(): Promise<void> {
     await this.stateLock.idle();
     await this.store.releaseLock();
+  }
+
+  /**
+   * Before the first worker turn of a run: one cheap call per role proving
+   * that the configured models answer, so an unusable model blocks the run
+   * at once with the provider's message instead of failing mid-mission.
+   * Capacity errors do not block (turns have their own retries).
+   */
+  private async checkProviders(): Promise<void> {
+    const roles = [
+      { role: 'worker', adapter: this.options.worker, model: this.config.worker.model },
+      { role: 'supervisor', adapter: this.options.supervisor, model: this.config.supervisor.model }
+    ] as const;
+    const checked: Record<string, { provider: string; model: string | null }> = {};
+    for (const { role, adapter, model } of roles) {
+      if (!adapter.probe) continue;
+      try {
+        const found = await adapter.probe(this.options.workingDirectory, this.stopController.signal);
+        checked[role] = { provider: adapter.provider, model: found.model ?? model ?? null };
+        this.log(`${role} ${adapter.provider}: model ${found.model ?? model ?? '(provider default)'} answers`);
+      } catch (error) {
+        if (this.stopping) return;
+        const message = redact(errorMessage(error));
+        if (classifyError(error) === 'TRANSIENT_CAPACITY') {
+          this.log(`${role} ${adapter.provider}: model check skipped (${message})`);
+          continue;
+        }
+        return this.enterBlocked('PROVIDER_CHECK',
+          `The ${role} (${adapter.provider}${model ? `, model "${model}"` : ', default model'}) cannot be used: ${message}\n`
+          + `Fix ${role}.model (or the ${adapter.provider} installation) in the configuration, then restart the run. `
+          + '"resume <text>" only retries the check with the current configuration.');
+      }
+    }
+    this.providersChecked = true;
+    await this.emit('providers.checked', checked);
   }
 
   /** Graceful stop: the active turn completes and is persisted first. */
@@ -497,7 +567,7 @@ export class Orchestrator {
   private async handoffText(session: Session): Promise<string> {
     const previous = this.config.sessions[this.config.sessions.indexOf(session) - 1];
     const header = `## Handoff from session ${previous?.id ?? '(none)'}\n` +
-      'Worker reports of the previous session (another Codex thread), provided by ColdPrompt. They are claims to verify, not evidence.';
+      'Worker reports of the previous session (another worker thread), provided by ColdPrompt. They are claims to verify, not evidence.';
     const refs = previous ? previous.missions.flatMap((m) => this.state.missions[m.id]?.resultRefs ?? []) : [];
     const reports: string[] = [];
     for (const ref of refs) {
@@ -520,14 +590,14 @@ export class Orchestrator {
     return [header, dropped ? `(${dropped} older report(s) omitted for length.)` : '', ...kept].filter(Boolean).join('\n\n');
   }
 
-  /** The Codex thread of the mission's session: recorded, else the session's resumeThread, else none (new). */
+  /** The worker thread of the mission's session: recorded, else the session's resumeThread, else none (new). */
   private threadFor(mission: Mission): string | undefined {
     return this.state.sessions[mission.session]?.workerThreadId ?? this.sessionOf(mission).resumeThread;
   }
 
   private storeWorkerSession(s: State, mission: Mission, sessionId: string | undefined): void {
     if (!sessionId) return;
-    s.sessions[mission.session] = { ...(s.sessions[mission.session] ?? {}), workerThreadId: sessionId };
+    s.sessions[mission.session] = { ...(s.sessions[mission.session] ?? {}), workerThreadId: sessionId, workerProvider: this.options.worker.provider };
     this.workerBinding = `${sessionId}|${mission.execution.readOnly}`;
   }
 
@@ -541,12 +611,12 @@ export class Orchestrator {
       const fromResumeThread = !this.state.sessions[mission.session]?.workerThreadId;
       await this.options.worker.resumeSession(threadId, sessionOptions);
       this.log(fromResumeThread
-        ? `session ${mission.session}: resuming EXISTING Codex thread ${threadId} (resumeThread)`
-        : `session ${mission.session}: resuming Codex thread ${threadId}`);
+        ? `session ${mission.session}: resuming EXISTING ${this.options.worker.provider} thread ${threadId} (resumeThread)`
+        : `session ${mission.session}: resuming ${this.options.worker.provider} thread ${threadId}`);
       await this.emit('worker.session_resumed', { threadId, sessionId: mission.session, missionId: mission.id, readOnly: mission.execution.readOnly, fromResumeThread });
     } else {
       await this.options.worker.startSession(sessionOptions);
-      this.log(`session ${mission.session}: starting a new Codex thread`);
+      this.log(`session ${mission.session}: starting a new ${this.options.worker.provider} thread`);
       await this.emit('worker.session_started', { sessionId: mission.session, missionId: mission.id, readOnly: mission.execution.readOnly });
     }
     this.workerBinding = key;
@@ -610,7 +680,7 @@ export class Orchestrator {
     const blockKind: BlockKind = kind === 'TRANSIENT_CAPACITY' ? 'RETRIES_EXHAUSTED' : kind === 'SESSION_LOCK' ? 'SESSION_LOCK' : 'FAILURE';
     const status: RuntimeStatus | undefined = kind === 'CANCELLED' ? undefined : blockKind === 'FAILURE' ? 'FAILED' : 'BLOCKED';
     const reason = kind === 'SESSION_LOCK'
-      ? `Codex thread ${sessionId ?? (this.currentMission() && this.threadFor(this.currentMission()!)) ?? '?'} still has an active writer after ${this.config.runtime.sessionLockRetryDelaysSeconds.length} retries. Another process may be using it; ColdPrompt will not kill it. Close the other writer, then resume. Last error: ${message}`
+      ? `Worker thread ${sessionId ?? (this.currentMission() && this.threadFor(this.currentMission()!)) ?? '?'} still has an active writer after ${this.config.runtime.sessionLockRetryDelaysSeconds.length} retries. Another process may be using it; ColdPrompt will not kill it. Close the other writer, then resume. Last error: ${message}`
       : kind === 'AUTHENTICATION'
         ? `Worker authentication failed: ${message}. Log in again, then resume.`
         : `Worker turn failed (${kind}): ${message}`;
@@ -746,13 +816,13 @@ export class Orchestrator {
     }
     const next = this.config.missions[this.config.missions.indexOf(mission) + 1];
     const endsSession = next !== undefined && next.session !== mission.session;
-    // Leaving a session (and its Codex thread) always needs a human.
+    // Leaving a session (and its worker thread) always needs a human.
     const needsApproval = !this.options.autoApproveTransitions
       && (endsSession || (mission.requireHumanApproval ?? this.config.runtime.requireHumanApprovalForMissionTransition));
     if (needsApproval) {
       return this.enterBlocked('MISSION_APPROVAL',
         endsSession
-          ? `Mission ${mission.id} passed verification; it ends session ${mission.session}. Human approval required: "approve mission" to start session ${next.session} on a new Codex thread, or "resume <instruction>" to keep working on ${mission.id}.`
+          ? `Mission ${mission.id} passed verification; it ends session ${mission.session}. Human approval required: "approve mission" to start session ${next.session} on a new worker thread, or "resume <instruction>" to keep working on ${mission.id}.`
           : `Mission ${mission.id} passed verification. Human approval required: "approve mission" to advance, or "resume <instruction>" to keep working on it.`,
         pending.turnId, 'BLOCKED', (s) => { s.pendingTurn = undefined; });
     }
@@ -809,7 +879,7 @@ export class Orchestrator {
     const id = this.options.supervisor.getSessionId();
     const started = this.options.supervisor.isSessionStarted();
     if (id !== this.state.supervisorSessionId || started !== this.state.supervisorSessionStarted) {
-      await this.mutate((s) => { s.supervisorSessionId = id; s.supervisorSessionStarted = started; });
+      await this.mutate((s) => { s.supervisorSessionId = id; s.supervisorSessionStarted = started; s.supervisorProvider = id ? this.options.supervisor.provider : undefined; });
     }
   }
 
@@ -888,6 +958,7 @@ export class Orchestrator {
     return {
       status: s.status,
       project: this.config.project.name,
+      providers: { worker: this.options.worker.provider, supervisor: this.options.supervisor.provider },
       session: mission ? (() => {
         const session = this.sessionOf(mission);
         return { id: session.id, title: session.title ?? null, index: this.config.sessions.indexOf(session) + 1, of: this.config.sessions.length };
@@ -1018,7 +1089,8 @@ export class Orchestrator {
             s.lastError = undefined;
             s.retry = undefined;
             // A read-only violation keeps its WORKER_DONE turn: the review still runs first.
-            s.pendingResolution = [s.pendingResolution, content].filter(Boolean).join('\n\n');
+            // A provider check is about the configuration, not a message for the worker.
+            if (kind !== 'PROVIDER_CHECK') s.pendingResolution = [s.pendingResolution, content].filter(Boolean).join('\n\n');
           });
           await this.emit('runtime.resumed', { hotPromptId: hp.id, previousStatus: status, kind });
           this.wake();

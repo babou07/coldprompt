@@ -9,8 +9,11 @@
 | `src/store.ts` | Atomic state (`write tmp + fsync + rename`), JSONL events, turn artifacts, owner lock, socket path |
 | `src/orchestrator.ts` | State machine, recovery, retries, HOT_PROMPT queue, console commands |
 | `src/worker.ts` / `src/supervisor.ts` | Provider-agnostic interfaces, supervisor prompts |
-| `src/adapters/codex.ts` | `@openai/codex-sdk`, streamed turns |
-| `src/adapters/claude.ts` | Claude Code CLI, `--print --output-format json --json-schema` |
+| `src/adapters/registry.ts` | Provider registry: config → adapter, doctor checks |
+| `src/adapters/codex.ts` | Codex worker: `@openai/codex-sdk`, streamed turns |
+| `src/adapters/codex-supervisor.ts` | Codex supervisor: read-only thread, `outputSchema` |
+| `src/adapters/claude.ts` | Claude supervisor: CLI `--print --output-format json --json-schema` |
+| `src/adapters/claude-worker.ts` | Claude worker: CLI `--print --output-format stream-json` |
 | `src/adapters/fake.ts` | Scripted adapters for tests and `--dry-run` |
 | `src/git.ts` | Read-only snapshots (`GIT_OPTIONAL_LOCKS=0`), commits between turns |
 | `src/verification.ts` | Command verifiers, git-clean, plugin loader |
@@ -20,6 +23,45 @@
 
 The orchestrator only sees `WorkerAdapter` / `SupervisorAdapter`; no
 provider name appears in it.
+
+## Providers
+
+Each role picks a provider in the config (`worker.provider`,
+`supervisor.provider`, zod discriminated unions in `types.ts`). Codex and
+Claude are implemented for both roles. `adapters/registry.ts` maps a
+provider name to `create()` and `check()` (doctor; failures also abort a
+real run). Adding a provider = a schema in the union, an adapter, a
+registry entry; the orchestrator, state, consoles and web page are
+unchanged (the web page shows provider names from `status.providers`).
+
+- **Thread ownership.** `state.sessions[id].workerProvider` and
+  `state.supervisorProvider` record who created each id. Opening a state
+  whose in-progress session or supervisor conversation belongs to another
+  provider is refused (`INVALID_CONFIG`). Completed sessions are not
+  checked, so the next session may switch worker provider. Ids recorded
+  before providers were tracked are not checked.
+- **Claude worker.** One Claude conversation per ColdPrompt session:
+  `--session-id <uuid>` on the first turn, `--resume` afterwards; the id is
+  persisted when the stream's `init` event arrives. Tool calls become
+  progress records; Bash calls are the turn's commands; Edit/Write results
+  its file changes; permission denials are reported as turn errors.
+  Read-only missions get only `readOnlyTools` with `--permission-mode
+  dontAsk` (Claude has no read-only shell sandbox, unlike Codex).
+- **Model check at run start.** Adapters may implement `probe()`: one
+  tiny call proving that the configured model answers (Claude: `--print`
+  without tools, system prompt or saved session; Codex: `codex exec
+  --sandbox read-only`, `--ephemeral` when the binary supports it). The
+  orchestrator probes both roles before the first worker turn of each run;
+  a failure enters `BLOCKED (PROVIDER_CHECK)` with the provider's message,
+  capacity errors are ignored. A persisted `PROVIDER_CHECK` block is
+  cleared on the next start (the check runs again with the new
+  configuration); its resolution text is not sent to the worker. Without
+  `--ephemeral` (old Codex binaries) each check leaves a small thread in
+  the Codex history.
+- **Codex supervisor.** One Codex thread for the plan, `sandboxMode:
+  read-only`, `approvalPolicy: never`, answers constrained by the same JSON
+  Schemas through `outputSchema`; prose is refused. Codex has no separate
+  system prompt, so the supervisor instructions open the first message.
 
 ## Turn lifecycle (crash-safe)
 

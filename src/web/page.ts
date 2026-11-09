@@ -56,13 +56,13 @@ export const PAGE_HTML = `<!doctype html>
 
 <footer id="composer">
   <div class="modes" role="tablist">
-    <button data-mode="ask" class="on" title="Question to Claude; the worker is untouched">ask</button>
+    <button data-mode="ask" class="on" title="Question to the supervisor; the worker is untouched">ask</button>
     <button data-mode="raw" title="Your directive, delivered verbatim at the next turn boundary">tell --raw</button>
-    <button data-mode="tell" title="Claude prepares a directive; you approve it">tell</button>
+    <button data-mode="tell" title="The supervisor prepares a directive; you approve it">tell</button>
     <button data-mode="resume" title="Resolution required to leave BLOCKED / FAILED">resume</button>
   </div>
   <form id="send-form" class="row">
-    <textarea id="text" rows="2" placeholder="Ask Claude…"></textarea>
+    <textarea id="text" rows="2" placeholder="Ask the supervisor…"></textarea>
     <button id="send" class="primary">Send</button>
   </form>
   <div id="toast" class="small" hidden></div>
@@ -235,6 +235,8 @@ function handle(name, data) {
   if (name === 'hello') {
     $('#project').textContent = data.project || 'ColdPrompt';
     document.title = 'ColdPrompt · ' + (data.project || '');
+    // Provider names first: the history below is labelled with them.
+    if (data.status && data.status.providers) { names.worker = display(data.status.providers.worker, 'Worker'); names.supervisor = display(data.status.providers.supervisor, 'Supervisor'); }
     $('#feed').textContent = ''; turns.clear();
     const keepFollow = follow; follow = false;
     for (const e of data.history) renderEvent(e);
@@ -257,6 +259,12 @@ function setConn(value, webDown) {
 // ---------------------------------------------------------------- status
 function renderStatus(s) {
   status = s;
+  if (s.providers) {
+    const changed = names.worker !== display(s.providers.worker, 'Worker') || names.supervisor !== display(s.providers.supervisor, 'Supervisor');
+    names.worker = display(s.providers.worker, 'Worker');
+    names.supervisor = display(s.providers.supervisor, 'Supervisor');
+    if (changed) $('#text').placeholder = PLACEHOLDER[mode]();
+  }
   const badge = $('#badge');
   const b = s.blocked;
   // A mission waiting for approval is a normal step, not an incident.
@@ -289,7 +297,7 @@ function renderStatus(s) {
     box.append(el('h2', '', 'Directives'));
     for (const d of proposed) {
       const row = el('div', 'd');
-      row.append(el('div', 'small muted', d.id + ' · proposed by Claude, needs your approval'), el('div', 'text', d.content));
+      row.append(el('div', 'small muted', d.id + ' · proposed by ' + names.supervisor + ', needs your approval'), el('div', 'text', d.content));
       const actions = el('div', 'row');
       const ok = el('button', 'primary', 'Approve'); ok.onclick = () => command('approve', d.id);
       const no = el('button', 'danger', 'Reject'); no.onclick = () => command('reject', d.id);
@@ -361,8 +369,8 @@ function renderEvent(e) {
     case 'mission.started': feed().append(el('div', 'divider', 'Mission ' + d.missionId)); break;
     case 'mission.completed': note('✓ mission ' + d.missionId + ' completed'); break;
     case 'mission.completion_rejected': note('✗ completion rejected by ' + (d.failed || []).join(', '), 'bad'); break;
-    case 'worker.session_started': note('new Codex thread' + (d.readOnly ? ' (read-only)' : '')); break;
-    case 'worker.session_resumed': note('Codex thread ' + String(d.threadId).slice(0, 8) + '… resumed' + (d.readOnly ? ' (read-only)' : '') + (d.fromResumeThread ? ' — existing thread from resumeThread' : '')); break;
+    case 'worker.session_started': note('new ' + names.worker + ' thread' + (d.readOnly ? ' (read-only)' : '')); break;
+    case 'worker.session_resumed': note(names.worker + ' thread ' + String(d.threadId).slice(0, 8) + '… resumed' + (d.readOnly ? ' (read-only)' : '') + (d.fromResumeThread ? ' — existing thread from resumeThread' : '')); break;
     case 'turn.started': {
       const t = turnCard(d.turnId, d.missionId, e.at, d.source);
       t.card.classList.add('running');
@@ -389,7 +397,7 @@ function renderEvent(e) {
     case 'turn.retry': note('retry ' + d.kind + ' #' + d.attempt + ' in ' + d.delaySeconds + 's: ' + (d.message || '')); break;
     case 'review.completed': {
       const box = el('div', 'decision d-' + d.decision);
-      box.append(el('b', '', 'Claude: ' + d.decision), el('span', 'text', d.reason || ''));
+      box.append(el('b', '', names.supervisor + ': ' + d.decision), el('span', 'text', d.reason || ''));
       feed().append(box);
       break;
     }
@@ -433,7 +441,7 @@ async function openReport(turnId) {
     const t = r.data;
     const section = (title, content) => { body.append(el('h3', '', title)); if (typeof content === 'string') body.append(el('pre', '', content)); else body.append(content); };
     section('Worker report', t.finalResponse || '(none)');
-    if (t.review) section('Claude review: ' + t.review.decision, t.review.reason + (t.review.evidence && t.review.evidence.length ? '\n\nEvidence:\n- ' + t.review.evidence.join('\n- ') : '') + (t.review.workerInstruction ? '\n\nInstruction to worker:\n' + t.review.workerInstruction : ''));
+    if (t.review) section(names.supervisor + ' review: ' + t.review.decision, t.review.reason + (t.review.evidence && t.review.evidence.length ? '\n\nEvidence:\n- ' + t.review.evidence.join('\n- ') : '') + (t.review.workerInstruction ? '\n\nInstruction to worker:\n' + t.review.workerInstruction : ''));
     for (const v of t.verification || []) section('Check ' + v.name + (v.passed ? ' ✓' : ' ✗'), v.output || '');
     if (t.completion) section('Completion checks', (t.completion.outcomes || []).map((o) => (o.passed ? '✓ ' : '✗ ') + o.name + '\n' + (o.output || '')).join('\n\n') || '(none)');
     if (t.fileChanges && t.fileChanges.length) section('Files changed', t.fileChanges.map((f) => f.kind + ' ' + f.path).join('\n'));
@@ -449,11 +457,19 @@ function scrollEnd(force) {
 }
 
 // ---------------------------------------------------------------- composer
-const PLACEHOLDER = { ask: 'Ask Claude (the worker is untouched)…', raw: 'Directive for Codex, delivered verbatim at the next turn…', tell: 'Describe a directive; Claude drafts it, you approve…', resume: 'Resolution: what to do to leave BLOCKED…' };
+// Display names of the configured providers (from status), e.g. Claude / Codex.
+const names = { worker: 'Worker', supervisor: 'Supervisor' };
+const display = (provider, fallback) => provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : fallback;
+const PLACEHOLDER = {
+  ask: () => 'Ask ' + names.supervisor + ' (the worker is untouched)…',
+  raw: () => 'Directive for ' + names.worker + ', delivered verbatim at the next turn…',
+  tell: () => 'Describe a directive; ' + names.supervisor + ' drafts it, you approve…',
+  resume: () => 'Resolution: what to do to leave BLOCKED…'
+};
 function setMode(m, focus) {
   mode = m;
   for (const b of document.querySelectorAll('.modes button')) b.classList.toggle('on', b.dataset.mode === m);
-  $('#text').placeholder = PLACEHOLDER[m];
+  $('#text').placeholder = PLACEHOLDER[m]();
   if (focus !== false) $('#text').focus();
 }
 
@@ -464,14 +480,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const text = $('#text').value.trim();
     if (!text) return;
     const cmd = mode === 'raw' ? 'tell' : mode;
-    const confirmText = mode === 'resume' ? 'Resume the worker with this resolution?' : mode === 'raw' ? 'Deliver this directive to Codex at the next turn?' : '';
+    const confirmText = mode === 'resume' ? 'Resume the worker with this resolution?' : mode === 'raw' ? 'Deliver this directive to ' + names.worker + ' at the next turn?' : '';
     $('#send').disabled = true;
     const ok = await command(cmd, text, mode === 'raw', confirmText);
     $('#send').disabled = false;
     if (ok) { $('#text').value = ''; if (mode === 'resume') setMode('ask', false); }
   };
   $('#text').addEventListener('keydown', (ev) => { if (ev.key === 'Enter' && (ev.ctrlKey || ev.metaKey)) $('#send-form').requestSubmit(); });
-  $('#approve-mission').onclick = () => command('approve', 'mission', false, 'Approve this mission and start the next one? (Leaving a session starts a new Codex thread.)');
+  $('#approve-mission').onclick = () => command('approve', 'mission', false, 'Approve this mission and start the next one? (Leaving a session starts a new worker thread.)');
   $('#blocked-more').onclick = () => { $('#blocked-reason').classList.toggle('clamp'); };
   $('#menu-btn').onclick = () => { $('#menu').hidden = !$('#menu').hidden; };
   for (const b of document.querySelectorAll('#menu [data-cmd]')) b.onclick = () => { $('#menu').hidden = true; command(b.dataset.cmd, '', false, b.dataset.cmd === 'stop' ? 'Stop ColdPrompt after the current turn?' : ''); };

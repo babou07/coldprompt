@@ -9,20 +9,24 @@ persistent coding agents.
 
 - `COLD_PROMPT`: a mission prepared before execution.
 - Session: a YAML file of missions that run one after another on **one
-  Codex thread** (same worker context). `coldprompt.yaml` (the plan) holds the
+  worker thread** (same worker context: a Codex thread or a Claude
+  conversation). `coldprompt.yaml` (the plan) holds the
   shared settings and lists the session files, run in order. Each session
   starts a new thread unless it sets `resumeThread:`; moving to the next
-  session always waits for `approve mission`. One Claude conversation
-  supervises the whole plan.
+  session always waits for `approve mission`. One supervisor conversation
+  spans the whole plan.
 - `HOT_PROMPT`: a question, directive or resolution injected at runtime.
-- Claude supervises Codex and evaluates mission progress.
+- A supervisor agent reviews every worker turn and decides whether the
+  mission continues, needs evidence, is blocked or is complete. Worker and
+  supervisor are each **Codex or Claude Code**, in any combination (see
+  [Providers](#providers)).
 - `BLOCKED` suspends the worker and requires human intervention.
 - Worker sessions must be resumed, not silently replaced.
 
 ## Status
 
-v0.4 alpha. The runtime loop, persistence, recovery, Codex and Claude
-adapters and the Unix-socket console are implemented and covered by
+v0.4 alpha. The runtime loop, persistence, recovery, the Codex and Claude
+adapters (both roles each) and the Unix-socket console are implemented and covered by
 tests with fake adapters, plus opt-in real-provider integration tests.
 
 It has **not** yet been used for a long unattended mission. Read
@@ -31,11 +35,13 @@ before doing so.
 
 ## Quickstart
 
-From a clone, with Node.js 22+, `codex` and `claude` installed and logged in:
+From a clone, with Node.js 22+ and the CLIs of your chosen providers
+(`codex`, `claude`) installed and logged in:
 
     npm install
     ln -s $PWD/bin/coldprompt ~/.local/bin/coldprompt   # put "coldprompt" on your PATH
-    cd /path/to/dir/with/coldprompt.yaml               # your plan (see "Plan and session files")
+    cp coldprompt.example.yaml /path/to/work/coldprompt.yaml   # your plan: edit it (see "Plan and session files")
+    cd /path/to/work
     coldprompt doctor                                  # validate config, CLIs and repository
     coldprompt run --dry-run                           # print the prompts; no provider call
 
@@ -59,9 +65,9 @@ Requires Node.js 22+.
     npm install
     npm run typecheck
     npm test                      # fake adapters, no provider calls
-    npm run test:integration      # real Claude + Codex, throwaway dirs
+    npm run test:integration      # real Claude + Codex in both roles, throwaway dirs
                                   # (COLDPROMPT_CODEX_PATH=$(command -v codex) to use your codex)
-    npm run doctor                # validate config, CLIs and repository
+    npm run doctor                # doctor on coldprompt.example.yaml
 
 ## Usage
 
@@ -100,7 +106,7 @@ Environment: `COLDPROMPT_CONFIG` (default `coldprompt.yaml`), `COLDPROMPT_HOME`
     id: s02-audit
     title: Independent audit       # optional
     handoff: previous              # optional: first prompt gets the previous session's worker reports
-    # resumeThread: <thread id>    # optional: continue an existing Codex thread
+    # resumeThread: <thread id>    # optional: continue an existing worker thread
     missions:
       - id: audit
         title: Audit the batch
@@ -108,14 +114,69 @@ Environment: `COLDPROMPT_CONFIG` (default `coldprompt.yaml`), `COLDPROMPT_HOME`
         completionCriteria: ["…"]
         execution: { readOnly: true, maxTurns: 5 }
 
-See `coldprompt.yaml` and `examples/` for a complete example. `coldprompt doctor`
+See `coldprompt.example.yaml` and `examples/` for a complete example. `coldprompt doctor`
 lists the sessions, their missions and which thread each will use.
+
+### Providers
+
+`worker:` and `supervisor:` each pick a `provider:`. Codex and Claude Code
+are supported in both roles, in any combination (the same provider in both
+roles uses two separate conversations). Options depend on the provider;
+unknown keys are rejected.
+
+    # Default: Codex works, Claude supervises
+    worker:     { provider: codex }
+    supervisor: { provider: claude }
+
+    # Swapped: Claude Code works, Codex supervises
+    worker:
+      provider: claude
+      permissionMode: acceptEdits            # unattended: allow edits...
+      allowedTools: ["Bash(npm test:*)"]     # ...and the commands you trust
+    supervisor:
+      provider: codex
+      codexPath: /home/you/.local/bin/codex
+
+| Role / provider | How it runs | Main options |
+|---|---|---|
+| worker `codex` | `@openai/codex-sdk` thread | `model`, `sandboxMode`, `approvalPolicy`, `reasoningEffort`, `codexPath` (permissions inherited from your Codex config when unset) |
+| worker `claude` | `claude --print --output-format stream-json`, one conversation per session | `model`, `permissionMode`, `tools`, `allowedTools`, `readOnlyTools`, `turnTimeoutSeconds` (permissions inherited from your Claude Code settings when unset) |
+| supervisor `claude` | `claude --print --json-schema` | `model`, `tools` (default Read, Grep, Glob), `permissionMode`, `timeoutSeconds` |
+| supervisor `codex` | Codex thread, read-only sandbox, `outputSchema` | `model`, `reasoningEffort`, `codexPath`, `timeoutSeconds` |
+
+**Models.** Both roles take `model:`; leave it `null` (or out) for the
+provider's default, or force one:
+
+    worker:     { provider: codex,  model: <a model id of your codex CLI> }
+    supervisor: { provider: claude, model: opus }   # alias or full id
+
+Each run checks both models before the first worker turn, with one tiny
+call per role (no tools, nothing saved for Claude; read-only and ephemeral
+for Codex). If a model does not exist, is not available to your account or
+needs a newer CLI, the run stops at once in `BLOCKED (PROVIDER_CHECK)` with
+the provider's message, before any work on the repository. Fix the
+configuration and restart the run (`resume` only retries the check).
+Capacity errors (rate limits, overload) do not block. The log and the
+event `providers.checked` show the model that answered.
+
+Read-only missions: Codex runs in its `read-only` sandbox (commands allowed,
+writes refused). Claude only gets `readOnlyTools` (Read, Grep, Glob by
+default), so no shell; adding `Bash` there is at your own risk.
+
+A thread id belongs to the provider that created it: changing the worker
+or supervisor provider while a session (or the supervisor conversation) is
+in progress is refused; finish the session or start a fresh state. The next
+session may use another worker provider.
+
+`coldprompt doctor` checks the CLIs of the configured providers. New
+providers plug in through `src/adapters/registry.ts` (see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)).
 
 ### Console commands
 
     status                 runtime status
-    ask <question>         HOT_PROMPT QUESTION: Claude answers, the worker is untouched
-    tell <directive>       HOT_PROMPT DIRECTIVE: Claude prepares an instruction (needs approve)
+    ask <question>         HOT_PROMPT QUESTION: the supervisor answers, the worker is untouched
+    tell <directive>       HOT_PROMPT DIRECTIVE: the supervisor prepares an instruction (needs approve)
     tell --raw <text>      your own directive, delivered verbatim at the next turn boundary
     approve <id>           approve a proposed directive
     approve mission        approve a pending mission transition (or accept a
@@ -143,8 +204,8 @@ automatically when the orchestrator restarts.
 ### Web console
 
 `coldprompt web` serves a page (default `127.0.0.1:8787`) that shows status,
-blocks, directives, live Codex activity (commands, outputs, file changes,
-messages) and Claude's decisions, and sends HOT_PROMPTs (`ask`, `tell`,
+blocks, directives, live worker activity (commands, outputs, file changes,
+messages) and the supervisor's decisions, and sends HOT_PROMPTs (`ask`, `tell`,
 `tell --raw`, `approve`, `resume`, `pause`, `stop`). It is a client of
 the console socket, like `coldprompt console`.
 
@@ -169,6 +230,6 @@ the console socket, like `coldprompt console`.
 The run unit is never started at login and never restarted
 automatically. `systemctl --user stop coldprompt-run` is graceful (it waits
 for the current worker turn). Run `coldprompt systemd --write` again after
-moving coldprompt.yaml or changing your node/codex installation (PATH).
+moving coldprompt.yaml or changing your node/codex/claude installation (PATH).
 
 Read AGENTS.md before changing the runtime.

@@ -94,11 +94,12 @@ SupervisorAdapter:
 - resumeSession()
 - getSessionId()
 
-Initial implementations:
-- CodexWorkerAdapter
-- ClaudeSupervisorAdapter
+Implementations (each role picks a provider in the config):
+- Worker: CodexWorkerAdapter, ClaudeWorkerAdapter
+- Supervisor: ClaudeSupervisorAdapter, CodexSupervisorAdapter
 
-Do not hardcode either provider into the orchestration engine.
+Do not hardcode any provider into the orchestration engine.
+Providers are registered in src/adapters/registry.ts.
 
 ## 4. Codex requirements
 

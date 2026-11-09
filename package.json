@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test --test-timeout=20000 tests/*.test.ts",
     "test:integration": "COLDPROMPT_INTEGRATION=1 node --import tsx --test tests/integration/*.test.ts",
-    "doctor": "tsx src/cli.ts doctor"
+    "doctor": "COLDPROMPT_CONFIG=coldprompt.example.yaml tsx src/cli.ts doctor"
   },
   "dependencies": {
     "@openai/codex-sdk": "^0.77.0",

@@ -38,13 +38,14 @@ export const missionSchema = z.object({
 });
 
 /**
- * A session file: missions that run one after another on ONE Codex thread.
- * A new session starts a new thread unless resumeThread names an existing one.
+ * A session file: missions that run one after another on ONE worker thread
+ * (Codex thread or Claude conversation). A new session starts a new thread
+ * unless resumeThread names an existing one of the configured worker.
  */
 export const sessionSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]+$/),
   title: z.string().min(1).optional(),
-  /** Existing Codex thread to continue instead of starting a new one. */
+  /** Existing worker thread (Codex thread / Claude session id) to continue instead of starting a new one. */
   resumeThread: z.string().min(1).optional(),
   /**
    * previous: the first prompt of this session includes the worker reports of
@@ -54,34 +55,87 @@ export const sessionSchema = z.object({
   missions: z.array(missionSchema).min(1)
 }).strict();
 
+// Providers. Each role (worker, supervisor) picks one with "provider:"; every
+// provider has its own options. Adding a provider: a schema here, an adapter
+// in src/adapters/, an entry in src/adapters/registry.ts.
+
+const reasoningEffort = z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']);
+const claudePermissionMode = z.enum(['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']);
+
+export const codexWorkerSchema = z.object({
+  provider: z.literal('codex'),
+  model: z.string().nullable().optional(),
+  /**
+   * Left undefined by default so the user's Codex configuration
+   * (e.g. a custom profile with writable .git) is inherited.
+   */
+  sandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
+  approvalPolicy: z.enum(['never', 'on-request', 'on-failure', 'untrusted']).optional(),
+  reasoningEffort: reasoningEffort.optional(),
+  skipGitRepoCheck: z.boolean().default(false),
+  codexPath: z.string().optional()
+}).strict();
+
+export const claudeWorkerSchema = z.object({
+  provider: z.literal('claude'),
+  model: z.string().nullable().optional(),
+  command: z.string().default('claude'),
+  /**
+   * Left undefined by default so the user's Claude Code settings (permission
+   * rules) are inherited. Unattended runs usually need acceptEdits plus
+   * allowedTools, or bypassPermissions.
+   */
+  permissionMode: claudePermissionMode.optional(),
+  /** Tools available to the worker (--tools). Default: all Claude Code tools. */
+  tools: z.array(z.string()).optional(),
+  /** Tools allowed without asking (--allowedTools), e.g. "Bash(npm test:*)". */
+  allowedTools: z.array(z.string()).optional(),
+  /** The only tools of a read-only mission. Bash is not read-only: add it at your own risk. */
+  readOnlyTools: z.array(z.string()).default(['Read', 'Grep', 'Glob']),
+  /** Upper bound for one worker turn. Default: none. */
+  turnTimeoutSeconds: z.number().positive().optional(),
+  appendSystemPrompt: z.string().optional()
+}).strict();
+
+export const claudeSupervisorSchema = z.object({
+  provider: z.literal('claude'),
+  model: z.string().nullable().optional(),
+  command: z.string().default('claude'),
+  tools: z.array(z.string()).default(['Read', 'Grep', 'Glob']),
+  permissionMode: claudePermissionMode.default('dontAsk'),
+  timeoutSeconds: z.number().positive().default(900),
+  appendSystemPrompt: z.string().optional()
+}).strict();
+
+/** Codex as supervisor: always a read-only sandbox, never asks for approval. */
+export const codexSupervisorSchema = z.object({
+  provider: z.literal('codex'),
+  model: z.string().nullable().optional(),
+  reasoningEffort: reasoningEffort.optional(),
+  skipGitRepoCheck: z.boolean().default(false),
+  codexPath: z.string().optional(),
+  timeoutSeconds: z.number().positive().default(900),
+  appendSystemPrompt: z.string().optional()
+}).strict();
+
+export const workerSchema = z.discriminatedUnion('provider', [codexWorkerSchema, claudeWorkerSchema]);
+export const supervisorSchema = z.discriminatedUnion('provider', [claudeSupervisorSchema, codexSupervisorSchema]);
+
+export type WorkerConfig = z.infer<typeof workerSchema>;
+export type SupervisorConfig = z.infer<typeof supervisorSchema>;
+export type CodexWorkerConfig = z.infer<typeof codexWorkerSchema>;
+export type ClaudeWorkerConfig = z.infer<typeof claudeWorkerSchema>;
+export type ClaudeSupervisorConfig = z.infer<typeof claudeSupervisorSchema>;
+export type CodexSupervisorConfig = z.infer<typeof codexSupervisorSchema>;
+
 const baseConfigShape = {
   version: z.literal(1),
   project: z.object({
     name: z.string(),
     workingDirectory: z.string()
   }),
-  worker: z.object({
-    provider: z.literal('codex'),
-    model: z.string().nullable().optional(),
-    /**
-     * Left undefined by default so the user's Codex configuration
-     * (e.g. a custom profile with writable .git) is inherited.
-     */
-    sandboxMode: z.enum(['read-only', 'workspace-write', 'danger-full-access']).optional(),
-    approvalPolicy: z.enum(['never', 'on-request', 'on-failure', 'untrusted']).optional(),
-    reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high', 'xhigh']).optional(),
-    skipGitRepoCheck: z.boolean().default(false),
-    codexPath: z.string().optional()
-  }).strict(),
-  supervisor: z.object({
-    provider: z.literal('claude'),
-    model: z.string().nullable().optional(),
-    command: z.string().default('claude'),
-    tools: z.array(z.string()).default(['Read', 'Grep', 'Glob']),
-    permissionMode: z.enum(['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']).default('dontAsk'),
-    timeoutSeconds: z.number().positive().default(900),
-    appendSystemPrompt: z.string().optional()
-  }).strict(),
+  worker: workerSchema,
+  supervisor: supervisorSchema,
   runtime: z.object({
     maxTurns: z.number().int().positive(),
     maxHours: z.number().positive(),
@@ -224,16 +278,20 @@ export interface Directive {
   deliveredInTurn?: string;
 }
 
+/** What a provider probe found: the model that actually answered, when known. */
+export interface ProbeResult { model?: string }
+
 export type BlockKind =
-  | 'SUPERVISOR'          // Claude returned BLOCKED
+  | 'SUPERVISOR'          // the supervisor returned BLOCKED
   | 'AMBIGUOUS_TURN'      // restart found a worker turn of unknown outcome
   | 'MISSION_APPROVAL'    // human approval required for a mission transition
   | 'MISSION_LIMIT'       // per-mission maxTurns reached
   | 'RETRIES_EXHAUSTED'   // transient errors exceeded the retry budget
-  | 'SESSION_LOCK'        // Codex thread store still has an active writer
+  | 'SESSION_LOCK'        // the worker thread still has an active writer
   | 'UNSAFE_REPOSITORY'   // repository in an unsafe state
   | 'READ_ONLY_VIOLATION' // a read-only mission changed the repository
   | 'VERIFICATION_FAILED' // completion checks failed on a read-only mission (the worker cannot fix them)
+  | 'PROVIDER_CHECK'     // the worker or supervisor model did not answer at run start
   | 'FAILURE';            // permanent failure, auth error, or supervisor STOP
 
 export interface BlockInfo {
@@ -302,8 +360,10 @@ export interface MissionProgress {
 }
 
 export interface SessionProgress {
-  /** The Codex thread of this session, once known. */
+  /** The worker thread of this session, once known. */
   workerThreadId?: string;
+  /** Worker provider that owns workerThreadId (absent in old states: codex). */
+  workerProvider?: string;
   startedAt?: string;
   completedAt?: string;
 }
@@ -327,7 +387,9 @@ export interface State {
   /** Thread from a pre-session (v1/v2) state; given to the current session on open. */
   legacyWorkerThreadId?: string;
   supervisorSessionId?: string;
-  /** True once Claude has accepted at least one prompt for supervisorSessionId. */
+  /** Supervisor provider that owns supervisorSessionId (absent in old states: claude). */
+  supervisorProvider?: string;
+  /** True once the supervisor has accepted at least one prompt for supervisorSessionId. */
   supervisorSessionStarted: boolean;
   nextWorkerInput?: WorkerInput;
   pendingTurn?: PendingTurn;

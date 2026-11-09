@@ -1,7 +1,10 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { configSchema, type Config } from '../src/types.js';
+import {
+  claudeSupervisorSchema, claudeWorkerSchema, codexSupervisorSchema, codexWorkerSchema, configSchema,
+  type ClaudeSupervisorConfig, type ClaudeWorkerConfig, type CodexSupervisorConfig, type CodexWorkerConfig, type Config
+} from '../src/types.js';
 import { Store } from '../src/store.js';
 import { Orchestrator, type OrchestratorOptions } from '../src/orchestrator.js';
 import { FakeSupervisorAdapter, FakeWorkerAdapter } from '../src/adapters/fake.js';
@@ -10,6 +13,12 @@ export async function tempDir(prefix = 'coldprompt-test-'): Promise<{ path: stri
   const path = await mkdtemp(join(tmpdir(), prefix));
   return { path, cleanup: () => rm(path, { recursive: true, force: true }) };
 }
+
+/** Provider configs with their defaults applied. */
+export const codexWorker = (o: Record<string, unknown> = {}): CodexWorkerConfig => codexWorkerSchema.parse({ provider: 'codex', ...o });
+export const claudeWorker = (o: Record<string, unknown> = {}): ClaudeWorkerConfig => claudeWorkerSchema.parse({ provider: 'claude', ...o });
+export const claudeSupervisor = (o: Record<string, unknown> = {}): ClaudeSupervisorConfig => claudeSupervisorSchema.parse({ provider: 'claude', ...o });
+export const codexSupervisor = (o: Record<string, unknown> = {}): CodexSupervisorConfig => codexSupervisorSchema.parse({ provider: 'codex', ...o });
 
 /**
  * A loaded plan. `missions` gives one session ("main"); `sessions` gives several

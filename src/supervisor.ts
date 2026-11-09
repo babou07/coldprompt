@@ -1,11 +1,13 @@
-import type { GitSnapshot, InteractionResult, Mission, Review, VerificationOutcome } from './types.js';
+import type { z } from 'zod';
+import { ColdPromptError } from './errors.js';
+import { DECISIONS, type GitSnapshot, type ProbeResult, type InteractionResult, type Mission, type Review, type VerificationOutcome } from './types.js';
 import type { WorkerTurnResult } from './worker.js';
 
 export interface EvaluationContext {
   mission: Mission;
   missionIndex: number;
   missionCount: number;
-  /** The session (one Codex thread) the mission belongs to; index is 0-based. */
+  /** The session (one worker thread) the mission belongs to; index is 0-based. */
   session?: { id: string; index: number; count: number };
   turnId: string;
   missionTurn: number;
@@ -39,15 +41,49 @@ export interface SupervisorCallOptions {
  * Provider-agnostic supervisor. The orchestrator serializes every call,
  * so implementations never see concurrent writers on one conversation.
  */
+/** JSON Schemas of the supervisor's two answers (strict: every provider must honour them). */
+export const REVIEW_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    decision: { type: 'string', enum: [...DECISIONS] },
+    reason: { type: 'string' },
+    workerInstruction: { type: 'string' },
+    evidence: { type: 'array', items: { type: 'string' } }
+  },
+  required: ['decision', 'reason', 'workerInstruction', 'evidence'],
+  additionalProperties: false
+} as const;
+
+export const INTERACTION_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    answer: { type: 'string' },
+    proposedDirective: { type: ['string', 'null'] }
+  },
+  required: ['answer', 'proposedDirective'],
+  additionalProperties: false
+} as const;
+
+/** Validates a supervisor answer; anything off-schema is a permanent error, never a decision. */
+export function parseSupervisorOutput<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new ColdPromptError('PERMANENT', `${label} output does not match the schema: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  }
+  return parsed.data;
+}
+
 export interface SupervisorAdapter {
   readonly provider: string;
   evaluateTurn(context: EvaluationContext, options?: SupervisorCallOptions): Promise<Review>;
   interact(request: InteractionRequest, options?: SupervisorCallOptions): Promise<InteractionResult>;
-  /** Binds the adapter to an existing conversation. `started` = Claude already saw a prompt. */
+  /** Binds the adapter to an existing conversation. `started` = the conversation already received a prompt. */
   resumeSession(sessionId: string, started: boolean): Promise<void>;
   getSessionId(): string | undefined;
   /** True once the bound conversation has received at least one prompt. */
   isSessionStarted(): boolean;
+  /** Optional: a cheap call proving that the configured model answers (run start). */
+  probe?(workingDirectory: string, signal?: AbortSignal): Promise<ProbeResult>;
 }
 
 function truncate(text: string, max: number): string {
@@ -84,7 +120,7 @@ export function buildEvaluationPrompt(ctx: EvaluationContext, maxOutputChars: nu
   const verification = ctx.verification.map((v) => `- ${v.name}: ${v.passed ? 'PASSED' : 'FAILED'}\n${truncate(v.output, 2000)}`);
   return [
     `# ColdPrompt worker turn review`,
-    ...(ctx.session ? [`Session ${ctx.session.index + 1}/${ctx.session.count}: ${ctx.session.id} (one Codex thread for all its missions)`] : []),
+    ...(ctx.session ? [`Session ${ctx.session.index + 1}/${ctx.session.count}: ${ctx.session.id} (one worker thread for all its missions)`] : []),
     `Mission ${ctx.missionIndex + 1}/${ctx.missionCount}: ${ctx.mission.id} — ${ctx.mission.title}`,
     `Turn ${ctx.missionTurn} of this mission (turn id ${ctx.turnId}). Read-only mission: ${ctx.mission.execution.readOnly}.`,
     ``,

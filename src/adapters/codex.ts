@@ -1,6 +1,12 @@
+import { execFile } from 'node:child_process';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { Codex, type ThreadEvent, type ThreadItem, type ThreadOptions, type TurnOptions } from '@openai/codex-sdk';
-import { ColdPromptError } from '../errors.js';
-import type { Config } from '../types.js';
+import { ColdPromptError, errorMessage } from '../errors.js';
+import type { CodexWorkerConfig, ProbeResult } from '../types.js';
+import { spawnRunner, type CommandRunner } from './process.js';
+import type { ProviderCheck } from './registry.js';
 import type { ExecuteTurnOptions, WorkerAdapter, WorkerProgress, WorkerSessionOptions, WorkerTurnResult } from '../worker.js';
 
 /** The subset of the Codex SDK the adapter uses (injectable for tests). */
@@ -69,6 +75,78 @@ export function describeItem(item: ThreadItem, phase: WorkerProgress['phase']): 
   }
 }
 
+export function createCodex(codexPath?: string): CodexLike {
+  return new Codex(codexPath ? { codexPathOverride: codexPath } : {});
+}
+
+/** Mirrors @openai/codex-sdk's default binary resolution (vendored per platform). */
+export function bundledCodexPath(): string {
+  const triple = `${process.arch === 'arm64' ? 'aarch64' : 'x86_64'}-unknown-linux-musl`;
+  const sdkEntry = fileURLToPath(import.meta.resolve('@openai/codex-sdk'));
+  return join(dirname(sdkEntry), '..', 'vendor', triple, 'codex', 'codex');
+}
+
+/** Doctor checks for the Codex binary the SDK will run. */
+export async function checkCodexBinary(codexPath: string | undefined, role: string): Promise<ProviderCheck[]> {
+  const version = async (bin: string) => (await promisify(execFile)(bin, ['--version'])).stdout.trim();
+  const binary = codexPath ?? bundledCodexPath();
+  try {
+    const used = await version(binary);
+    const checks: ProviderCheck[] = [{ level: 'ok', message: `${role}: Codex used by the SDK: ${binary} (${used})` }];
+    const system = await version('codex').catch(() => undefined);
+    if (!codexPath && system && system !== used) {
+      checks.push({ level: 'warn', message: `${role}: your PATH codex is ${system} but the SDK runs its bundled ${used}; set codexPath to use yours (config compatibility, thread resume)` });
+    }
+    return checks;
+  } catch (error) {
+    return [{ level: 'fail', message: `${role}: Codex CLI not runnable (${binary}): ${errorMessage(error)}` }];
+  }
+}
+
+const ephemeralSupport = new Map<string, Promise<boolean>>();
+
+export interface CodexProbeOptions {
+  codexPath?: string;
+  model?: string | null;
+  reasoningEffort?: string;
+  workingDirectory: string;
+  signal?: AbortSignal;
+  runner?: CommandRunner;
+}
+
+/**
+ * Proves that the configured model answers with the Codex binary the SDK
+ * uses: one tiny `codex exec` in a read-only sandbox (ephemeral when the
+ * binary supports it). Returns the configured model (Codex does not report it).
+ */
+export async function probeCodexModel(options: CodexProbeOptions): Promise<ProbeResult> {
+  const run = options.runner ?? spawnRunner;
+  const binary = options.codexPath ?? bundledCodexPath();
+  const cwd = options.workingDirectory;
+  if (!ephemeralSupport.has(binary)) {
+    ephemeralSupport.set(binary, run(binary, ['exec', '--help'], { cwd, timeoutMs: 30_000 }).then((r) => r.stdout.includes('--ephemeral'), () => false));
+  }
+  const args = ['exec', '--json', '--skip-git-repo-check', '--sandbox', 'read-only'];
+  if (await ephemeralSupport.get(binary)) args.push('--ephemeral');
+  if (options.model) args.push('--model', options.model);
+  if (options.reasoningEffort) args.push('-c', `model_reasoning_effort="${options.reasoningEffort}"`);
+  args.push('-');
+  const out = await run(binary, args, { input: 'Reply with OK only.', cwd, signal: options.signal, timeoutMs: 180_000 });
+  const errors: string[] = [];
+  for (const line of out.stdout.split('\n')) {
+    try {
+      const event = JSON.parse(line) as { type?: string; message?: string; error?: { message?: string } };
+      if (event.type === 'error' && event.message) errors.push(event.message);
+      if (event.type === 'turn.failed' && event.error?.message) errors.push(event.error.message);
+    } catch { /* not JSON */ }
+  }
+  if (out.code !== 0 || errors.length) {
+    const message = [...new Set(errors)].join('; ') || out.stderr.trim().split('\n').slice(-3).join(' ');
+    throw new Error(message.slice(0, 500) || `codex exited ${out.code}`);
+  }
+  return { model: options.model ?? undefined };
+}
+
 export class CodexWorkerAdapter implements WorkerAdapter {
   readonly provider = 'codex';
   private readonly codex: CodexLike;
@@ -76,8 +154,8 @@ export class CodexWorkerAdapter implements WorkerAdapter {
   private sessionId?: string;
   private active?: AbortController;
 
-  constructor(private readonly config: Config['worker'], codex?: CodexLike) {
-    this.codex = codex ?? new Codex(config.codexPath ? { codexPathOverride: config.codexPath } : {});
+  constructor(private readonly config: CodexWorkerConfig, codex?: CodexLike) {
+    this.codex = codex ?? createCodex(config.codexPath);
   }
 
   /**
@@ -192,5 +270,9 @@ export class CodexWorkerAdapter implements WorkerAdapter {
 
   getSessionId(): string | undefined {
     return this.sessionId;
+  }
+
+  probe(workingDirectory: string, signal?: AbortSignal): Promise<ProbeResult> {
+    return probeCodexModel({ codexPath: this.config.codexPath, model: this.config.model, reasoningEffort: this.config.reasoningEffort, workingDirectory, signal });
   }
 }

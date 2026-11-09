@@ -385,7 +385,7 @@ test('sessions: missions of a session share one thread, each session gets a new 
   // a -> b inside s1: no approval (runtime flag false in tests).
   await waitFor(() => h.orchestrator.snapshotState.blocked?.kind === 'MISSION_APPROVAL');
   assert.equal(h.orchestrator.snapshotState.missionIndex, 1, 'blocked at the end of s1, after b');
-  assert.match(h.orchestrator.snapshotState.blocked!.reason, /ends session s1[\s\S]*session s2 on a new Codex thread/);
+  assert.match(h.orchestrator.snapshotState.blocked!.reason, /ends session s1[\s\S]*session s2 on a new worker thread/);
   const status = h.orchestrator.statusSummary() as any;
   assert.deepEqual(status.session, { id: 's1', title: null, index: 1, of: 2 });
   assert.equal(status.mission.inSession, 2);
