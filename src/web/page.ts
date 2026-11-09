@@ -39,6 +39,10 @@ export const PAGE_HTML = `<!doctype html>
   <div class="row"><button id="start-run">Start run</button><span id="start-msg" class="muted small"></span></div>
 </section>
 
+<section id="directives" class="card" hidden></section>
+
+<main id="feed" aria-live="polite"></main>
+
 <section id="blocked" class="card alert" hidden>
   <div class="row"><strong id="blocked-kind"></strong><span id="blocked-at" class="muted small"></span></div>
   <div id="blocked-reason" class="text clamp"></div>
@@ -47,10 +51,6 @@ export const PAGE_HTML = `<!doctype html>
     <button id="approve-mission" class="primary" hidden>Approve mission</button>
   </div>
 </section>
-
-<section id="directives" class="card" hidden></section>
-
-<main id="feed" aria-live="polite"></main>
 
 <button id="jump" class="jump" hidden>↓ live</button>
 
@@ -89,9 +89,10 @@ header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px 
 .badge{font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--line)}
 .badge.RUNNING{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
 .badge.BLOCKED,.badge.FAILED{background:color-mix(in srgb,var(--bad) 18%,transparent);color:var(--bad)}
+.badge.APPROVAL{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent)}
 .badge.PAUSED{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:10px 12px}
-.card.alert{border-color:var(--bad)}.card.warn{border-color:var(--warn)}
+.card.alert{border-color:var(--bad)}.card.approval{border-color:var(--accent)}.card.warn{border-color:var(--warn)}
 h2{font-size:16px;margin:0 0 6px}
 button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);border-radius:9px;padding:7px 12px;cursor:pointer}
 button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
@@ -257,23 +258,28 @@ function setConn(value, webDown) {
 function renderStatus(s) {
   status = s;
   const badge = $('#badge');
-  badge.textContent = s.status + (s.stopping ? ' · stopping' : '') + (s.pauseRequested ? ' · pause requested' : '');
-  badge.className = 'badge ' + s.status;
+  const b = s.blocked;
+  // A mission waiting for approval is a normal step, not an incident.
+  const approval = !!b && s.status === 'BLOCKED' && b.kind === 'MISSION_APPROVAL';
+  badge.textContent = (approval ? 'WAITING FOR APPROVAL' : s.status) + (s.stopping ? ' · stopping' : '') + (s.pauseRequested ? ' · pause requested' : '');
+  badge.className = 'badge ' + (approval ? 'APPROVAL' : s.status);
   $('#mission').textContent = s.mission
     ? (s.session ? 'Session ' + s.session.index + '/' + s.session.of + ' ' + s.session.id + ' · ' : '')
       + 'Mission ' + (s.mission.inSession ? s.mission.inSession + '/' + s.mission.ofSession : s.mission.index + '/' + s.mission.of) + ' · ' + s.mission.id + ' · turn ' + s.missionTurns + ' (total ' + s.totalTurns + ')'
       + (s.git && s.git.isRepo ? ' · ' + s.git.branch + '@' + String(s.git.head).slice(0, 8) + (s.git.dirty ? ' dirty(' + s.git.changedFiles + ')' : ' clean') : '')
     : '';
-  const b = s.blocked;
+  const wasHidden = $('#blocked').hidden;
   $('#blocked').hidden = !b;
   if (b) {
-    $('#blocked-kind').textContent = (s.status === 'FAILED' ? 'FAILED' : 'BLOCKED') + ' · ' + b.kind;
+    $('#blocked').className = 'card ' + (approval ? 'approval' : 'alert');
+    $('#blocked-kind').textContent = approval ? 'Mission complete · waiting for your approval' : (s.status === 'FAILED' ? 'FAILED' : 'BLOCKED') + ' · ' + b.kind;
     $('#blocked-at').textContent = new Date(b.at).toLocaleString();
     $('#blocked-reason').textContent = b.reason;
     $('#blocked-reason').classList.add('clamp');
     $('#blocked-more').hidden = b.reason.length < 300;
     $('#approve-mission').hidden = !(b.kind === 'MISSION_APPROVAL' || b.kind === 'VERIFICATION_FAILED');
-    if (mode === 'ask' && !$('#text').value) setMode('resume', false);
+    if (!approval && mode === 'ask' && !$('#text').value) setMode('resume', false);
+    if (wasHidden) scrollEnd();
   }
   const box = $('#directives');
   box.textContent = '';
@@ -388,7 +394,7 @@ function renderEvent(e) {
       break;
     }
     case 'review.failed': note('review failed: ' + d.kind + ': ' + d.message, 'bad'); break;
-    case 'runtime.blocked': note('⏸ BLOCKED (' + d.kind + ')', 'bad'); break;
+    case 'runtime.blocked': if (d.kind !== 'MISSION_APPROVAL') note('⏸ BLOCKED (' + d.kind + ')', 'bad'); break;
     case 'runtime.failed': note('✗ FAILED (' + d.kind + ')', 'bad'); break;
     case 'runtime.resumed': note('▶ resumed'); break;
     case 'runtime.paused': note('paused'); break;
