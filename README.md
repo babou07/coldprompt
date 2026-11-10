@@ -56,7 +56,7 @@ From a clone, with Node.js 22+ and the CLIs of your chosen providers
     tailscale serve --bg 8787       # if refused: sudo tailscale set --operator=$USER
 
 Then open `http://127.0.0.1:8787` (or `https://<host>.<tailnet>.ts.net` on
-the phone) and press **Start run** in the ⋯ panel, or run `systemctl --user start coldprompt-run`.
+the phone) and press **Start run** in the Main tab of the web page, or run `systemctl --user start coldprompt-run`.
 Nothing runs against your repository until you do.
 
 ## Development
@@ -165,14 +165,14 @@ then:
 - Otherwise the run refuses to start: an unfinished plan, or a list that still
   contains missions of the previous run (reordered, partly kept), would
   silently resume at the wrong mission. Restore the list, or archive first.
-- **Archive plan** in the web panel (shown while the run is stopped and the
+- **Archive plan** in the web page's Main tab (shown while the run is stopped and the
   plan is finished), or `coldprompt archive`, archives the plan without
   starting anything. `coldprompt archive --force` also archives an unfinished
   run.
-- **Reset run** in the web panel (shown while the run is stopped and the plan
+- **Reset run** in the web page's Main tab (shown while the run is stopped and the plan
   is not finished), or `coldprompt reset`, archives the run with the reason
   `reset` and lets the plan start again from its first mission, e.g. after a
-  block that was fixed outside ColdPrompt. The panel can start the run right
+  block that was fixed outside ColdPrompt. The page can start the run right
   after. The repository is never touched: commits the run made are listed
   before the confirmation and left as they are.
 
@@ -263,6 +263,12 @@ providers plug in through `src/adapters/registry.ts` (see
     approve mission        approve a pending mission transition (or accept a
                            read-only mission whose completion checks failed)
     reject <id>            reject a directive
+    extend <n>             add n turns (1-100) to the current mission; leaves a
+                           turn-limit block (MISSION_LIMIT) and resumes
+    complete               end the current mission now if its completion checks
+                           pass (run blocked, failed or paused, no turn waiting)
+    skip                   end the current mission without completion checks;
+                           it is marked skipped and the next mission starts
     directives             list directives
     pause                  pause at the next safe boundary
     resume <resolution>    RESOLUTION: required to leave BLOCKED/FAILED
@@ -284,67 +290,86 @@ automatically when the orchestrator restarts.
 
 ### Web console
 
-`coldprompt web` serves a page (default `127.0.0.1:8787`) that shows status,
-blocks, directives, live worker activity (commands, outputs, file changes,
-messages) and the supervisor's decisions, and sends HOT_PROMPTs (`ask`, `tell`,
-`tell --raw`, `approve`, `resume`, `pause`, `stop`). It is a client of
-the console socket, like `coldprompt console`.
+`coldprompt web` serves a page (default `127.0.0.1:8787`) to follow and
+steer the run from a browser or a phone. It is a client of the console
+socket, like `coldprompt console`, and uses the same commands; with
+`--run-unit` (as the systemd unit does) it can also start, restart, archive
+and reset the run.
 
-- Auth: a random token in `<COLDPROMPT_HOME>/web-token` (0600). Open the
+- **Auth**: a random token in `<COLDPROMPT_HOME>/web-token` (0600). Open the
   URL printed at start-up (`...#token=...`, only shown on a terminal) or
   paste the token in the page. It is sent as a Bearer header, never a
   cookie; the token stays in the browser's local storage until
-  "Forget token".
-- Two tabs. **Main**: the run controls, the plan recap (folded; its line
-  shows the session, mission, turn and git state), the block card, the
-  directives, the message box and, right under it, your messages with their
-  answers. **Logs**: the live feed, newest first: worker turns (commands,
-  outputs, file changes, messages), each with the supervisor's decision and
-  its full report. Finished turns are folded (a click on the header opens
-  one); only the running turn stays open. `#tab=logs` in the URL opens it.
-- Labels give the role, then the provider from the configuration
+  **Forget token**.
+- **Names**: labels give the role, then the provider from the configuration
   (`supervisor.provider`, `worker.provider`), e.g. *supervisor (Claude)* and
   *worker (Codex)*, so a Claude supervisor and a Claude worker stay distinct.
-- Controls: `Pause | Stop | Restart | Forget token` while the run is up
-  (*Stop after this turn* while a turn is running). **Restart** (with `--run-unit`) runs
-  `systemctl --user restart <unit>`: the current turn finishes, then the run
-  starts again with the YAML files reloaded and its progress kept. Use it
-  after editing `coldprompt.yaml` or a session file: `resume` only retries
-  with the configuration loaded at the start. The page warns when these
-  files changed since the run started. When the run is stopped, these give
-  way to **Start run** (only with `--run-unit`, as the systemd unit does). It
-  runs `systemctl --user start <unit>` after a confirmation, so the run
-  reloads the YAML files; one start at a time. If the run ends within
-  seconds (invalid config, refused state), the page shows the journal lines
-  of that start, secrets masked. While the run is stopped, the page shows its
-  last known state, **Archive plan** when the plan is finished, and
-  **Reset run** when it is not (see "Starting a new plan").
-- Phone over Tailscale: keep the default localhost bind and run
+- **Phone over Tailscale**: keep the default localhost bind and run
   `tailscale serve --bg 8787`, then open `https://<host>.<tailnet>.ts.net`.
   Do not bind to `0.0.0.0`.
 
-The message box has two buttons:
+#### Main tab
 
-| Button | Goes to | Effect on the worker | Needs approval |
-|---|---|---|---|
-| **Ask supervisor (\<provider\>)** | the supervisor only | none; it may propose an instruction | yes, to deliver its proposal |
-| **Ask worker (\<provider\>)** | the worker | your exact text, at its next turn | no: sending it is the approval |
-| **Resume worker (\<provider\>)** (same button while the run waits for you) | the worker and the orchestrator | leaves `BLOCKED` / `FAILED` / `PAUSED`; your text is the resolution, sent with the next turn | no: it is your decision |
+From top to bottom:
 
-- **Ask**: a question or a request. The supervisor answers under your
-  message from what it has followed so far; the worker is not interrupted
-  and never sees it. If an instruction to the worker would help, the answer
-  carries it with **Approve → worker** / **Reject**, and **Approve and
-  resume** while the run is blocked. Usable at any time, even during a turn.
-- **Ask / Resume worker**: your own text, after a confirmation. A running
-  turn is never cut. A `PROVIDER_CHECK` block only retries the check: fix
-  the configuration and **Restart** instead.
-- While a message is on its way, the page shows *Sending…*, then
-  *Supervisor (\<provider\>) is thinking…* until the answer arrives. Ctrl+Enter asks the
-  supervisor.
+1. **Controls**: `Pause | Stop | Restart | Forget token` while the run is up
+   (*Stop after this turn* while a turn is running).
+   - **Restart** runs `systemctl --user restart <unit>`: the current turn
+     finishes, then the run starts again with the YAML files reloaded and
+     its progress kept. Use it after editing `coldprompt.yaml` or a session
+     file: `resume` only retries with the configuration loaded at the start.
+     The page warns when these files changed since the run started.
+   - When the run is stopped: **Start run** (`systemctl --user start <unit>`,
+     after a confirmation; one start at a time; if the run ends within
+     seconds, the page shows the journal lines of that start, secrets
+     masked), **Archive plan** when the plan is finished, **Reset run** when
+     it is not (see "Starting a new plan").
+2. **Plan recap**, folded: its line shows the session, mission, turn and git
+   state; open it for every session and mission (skipped ones are marked).
+   **Approve session N, mission M** appears when a mission waits for
+   approval.
+3. **Block card**, while the run is blocked: the reason, and the ways out
+   that do not need the worker: **+3 / +10 turns** on a turn-limit block
+   (`extend`), **Complete mission** (`complete`: its completion checks run
+   first, it ends only if they pass) and **Skip mission** (`skip`). Not for a
+   mission waiting for approval (use **Approve**) or a provider check (fix
+   the configuration, then **Restart**).
+4. **Directives** proposed or approved, with **Approve** / **Reject** /
+   **Withdraw**.
+5. **Message box** with two buttons:
 
-The console client keeps the underlying commands: `ask`, `tell` (the
-supervisor drafts a directive), `tell --raw`, `resume`, `approve`, `reject`.
+   | Button | Goes to | Effect on the worker | Needs approval |
+   |---|---|---|---|
+   | **Ask supervisor (\<provider\>)** | the supervisor only | none; it may propose an instruction | yes, to deliver its proposal |
+   | **Ask worker (\<provider\>)** | the worker | your exact text, at its next turn | no: sending it is the approval |
+   | **Resume worker (\<provider\>)**, the same button while the run waits for you | the worker and the orchestrator | leaves `BLOCKED` / `FAILED` / `PAUSED`; your text is the resolution, sent with the next turn | no: it is your decision |
+
+   - **Ask supervisor**: a question or a request, at any time, even during a
+     turn. The worker is not interrupted and never sees it. If an
+     instruction to the worker would help, the answer carries it with
+     **Approve → worker** / **Reject**, plus **Approve and resume** while the
+     run is blocked.
+   - **Ask / Resume worker**: your own text, after a confirmation. A running
+     turn is never cut. A `PROVIDER_CHECK` block only retries the check: fix
+     the configuration and **Restart** instead.
+   - Ctrl+Enter asks the supervisor.
+6. **Your messages and their answers**, newest first, right under the box.
+   While a message is on its way the page shows *Sending…*, then
+   *Supervisor (\<provider\>) is thinking…* until the answer arrives; if
+   sending fails, the text comes back in the box. Long answers fold
+   (**show all**).
+
+#### Logs tab
+
+The live feed, newest first: worker turns (commands, outputs, file changes,
+messages), each with the supervisor's decision and a **Full report**.
+Finished turns are folded, their decision still visible; a click on the
+header opens one. Only the running turn stays open. `#tab=logs` in the URL
+opens this tab.
+
+The console client keeps all the underlying commands, including `tell` (the
+supervisor drafts a directive) and `tell --raw`, which the page's
+**Ask worker** sends.
 
 ### systemd (instead of tmux)
 

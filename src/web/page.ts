@@ -62,6 +62,7 @@ export const PAGE_HTML = `<!doctype html>
     <div class="row"><strong id="blocked-kind"></strong><span id="blocked-at" class="muted small"></span></div>
     <div id="blocked-reason" class="text clamp"></div>
     <button id="blocked-more" class="link">show all</button>
+    <div id="blocked-actions" class="row wrap" hidden></div>
   </section>
 
   <section id="directives" class="card" hidden></section>
@@ -203,6 +204,7 @@ button.link.danger{color:var(--bad)}
 dialog{width:min(900px,96vw);max-height:90vh;border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--fg);padding:12px 14px}
 dialog::backdrop{background:rgba(0,0,0,.45)}
 #report-body h3{font-size:14px;margin:12px 0 4px}
+#blocked-actions{gap:8px;margin-top:8px}
 #directives .d{border-top:1px solid var(--line);padding:8px 0}#directives .d:first-of-type{border-top:none}
 `;
 
@@ -422,7 +424,7 @@ function renderPlan(s) {
     const list = el('div', 'missions');
     for (const m of session.missions) {
       const active = m.id === current && m.status !== 'COMPLETED';
-      const line = checkLine(active ? 'current' : '', m.index + '. ' + m.id, m.title, m.status === 'COMPLETED', active);
+      const line = checkLine(active ? 'current' : '', m.index + '. ' + m.id, m.title + (m.skipped ? ' (skipped)' : ''), m.status === 'COMPLETED', active);
       if (active && approvable(s)) line.lastChild.append(' ', el('span', 'waiting', 'waiting for approval'));
       list.append(line);
     }
@@ -479,6 +481,7 @@ function renderStatus(s) {
     $('#blocked-reason').classList.add('clamp');
     $('#blocked-more').hidden = b.reason.length < 300;
   }
+  renderBlockedActions(s);
   const box = $('#directives');
   box.textContent = '';
   const proposed = s.proposedDirectives || [], approved = s.approvedDirectives || [];
@@ -507,6 +510,34 @@ function renderStatus(s) {
   stop.title = turnRunning ? 'Stop gracefully after the current turn' : 'Stop the orchestrator now (no turn is running)';
   renderComposer();
   refreshExchangeActions();
+}
+
+/** Buttons that end a block without the worker: more turns, complete (checks run), skip. */
+function renderBlockedActions(s) {
+  const box = $('#blocked-actions');
+  box.textContent = '';
+  const b = s.blocked;
+  const show = connected && b && (s.status === 'BLOCKED' || s.status === 'FAILED') && b.kind !== 'MISSION_APPROVAL' && b.kind !== 'PROVIDER_CHECK' && s.mission && !s.pendingTurn;
+  box.hidden = !show;
+  if (!show) return;
+  const id = s.mission.id;
+  const act = (label, cls, cmd, text, question, busyLabel) => {
+    const btn = el('button', cls, label);
+    btn.onclick = async () => {
+      if (question && !confirm(question)) return;
+      btn.disabled = true;
+      const keep = btn.textContent;
+      if (busyLabel) { btn.textContent = ''; btn.append(el('span', 'spin'), ' ' + busyLabel); }
+      try { await command(cmd, text); } finally { btn.disabled = false; btn.textContent = keep; }
+    };
+    box.append(btn);
+  };
+  if (b.kind === 'MISSION_LIMIT') {
+    act('+3 turns', 'primary', 'extend', '3', '', '');
+    act('+10 turns', '', 'extend', '10', '', '');
+  }
+  act('Complete mission', '', 'complete', '', 'End mission ' + id + ' now? Its completion checks run first; it ends only if they pass.', 'Checking…');
+  act('Skip mission', 'danger', 'skip', '', 'Skip mission ' + id + '? It ends without completion checks and is marked skipped; the next mission starts.', '');
 }
 
 // ---------------------------------------------------------------- feed
@@ -611,6 +642,8 @@ function renderEvent(e) {
     case 'runtime.resumed': note('▶ resumed'); break;
     case 'runtime.paused': note('paused'); break;
     case 'runtime.completed': note('✓ all missions completed'); break;
+    case 'mission.extended': note('mission ' + d.missionId + ': +' + d.added + ' turn(s), limit ' + d.limit); break;
+    case 'mission.skipped': note('⤼ mission ' + d.missionId + ' skipped (no completion checks)', 'bad'); break;
     case 'mission.output': note('output "' + d.name + '" of ' + d.missionId + ' stored'); break;
     case 'plan.finalize_started': note('supervisor (' + names.supervisor + ') finalizes the plan…'); break;
     case 'plan.finalized': note('✓ plan finalized: ' + d.summary); if (proposalsEnabled) loadProposals(); break;

@@ -578,3 +578,76 @@ test('a CONTINUE that only names the current mission or an earlier one is accept
     await home.cleanup(); await work.cleanup();
   }
 });
+
+test('extend: a mission at its turn limit gets more turns and resumes on the same thread', () => withDirs(async (home, work) => {
+  const worker = new FakeWorkerAdapter(['t1', 't2', 't3']);
+  const supervisor = new FakeSupervisorAdapter([{ decision: 'CONTINUE' }, { decision: 'CONTINUE' }, { decision: 'MISSION_COMPLETE' }]);
+  const config = makeConfig({ missions: [{ id: 'a', title: 'A', prompt: { type: 'COLD_PROMPT', content: 'Do A' }, execution: { maxTurns: 1 } }] });
+  const h = await start(home, work, config, worker, supervisor);
+  await waitFor(() => h.orchestrator.snapshotState.blocked?.kind === 'MISSION_LIMIT', 3000, 'MISSION_LIMIT');
+  assert.match(h.orchestrator.snapshotState.blocked!.reason, /"extend <n>" adds turns/);
+  assert.equal((await h.orchestrator.handleCommand({ command: 'extend', text: '0' })).ok, false);
+  const r = await h.orchestrator.handleCommand({ command: 'extend', text: '1' });
+  assert.equal(r.ok, true);
+  assert.match((r as any).data.message, /limit now 2 turns \(1 used\); resuming/);
+  await waitFor(() => h.orchestrator.snapshotState.blocked?.kind === 'MISSION_LIMIT' && turnCount(worker) === 2, 3000, 'limit again after one more turn');
+  await h.orchestrator.handleCommand({ command: 'extend', text: '5' });
+  await h.done;
+  const state = await h.store.load();
+  assert.equal(state.status, 'COMPLETED');
+  assert.equal(state.missions.a.extraTurns, 6);
+  assert.equal(turnCount(worker), 3);
+  assert.equal(worker.calls.filter((c) => c.kind === 'start').length, 1, 'one worker thread');
+}));
+
+test('complete: ends a blocked mission only if its completion checks pass; skip ends it without checks', () => withDirs(async (home, work) => {
+  let pass = false;
+  const verifier = { name: 'tests', when: 'completion' as const, run: async () => ({ passed: pass, output: pass ? 'ok' : '1 failing' }) };
+  const worker = new FakeWorkerAdapter(['a1', 'b1', 'c1']);
+  const supervisor = new FakeSupervisorAdapter([
+    { decision: 'BLOCKED', reason: 'need a human' },
+    { decision: 'BLOCKED', reason: 'stuck again' },
+    { decision: 'MISSION_COMPLETE' }
+  ]);
+  const config = makeConfig({
+    verification: { commands: [{ name: 'tests', run: 'true' }] },
+    missions: [
+      { id: 'a', title: 'A', prompt: { type: 'COLD_PROMPT', content: 'Do A' } },
+      { id: 'b', title: 'B', prompt: { type: 'COLD_PROMPT', content: 'Do B' } },
+      { id: 'c', title: 'C', prompt: { type: 'COLD_PROMPT', content: 'Do C' } }
+    ]
+  });
+  const h = await start(home, work, config, worker, supervisor, { verifiers: [verifier] });
+  await waitFor(() => h.orchestrator.snapshotState.status === 'BLOCKED', 3000, 'blocked on a');
+  const failed = await h.orchestrator.handleCommand({ command: 'complete' });
+  assert.equal(failed.ok, false);
+  assert.match((failed as any).error, /Completion checks failed[\s\S]*1 failing[\s\S]*"skip"/);
+  assert.equal(h.orchestrator.snapshotState.status, 'BLOCKED', 'still blocked on a');
+  pass = true;
+  assert.equal((await h.orchestrator.handleCommand({ command: 'complete' })).ok, true);
+  await waitFor(() => h.orchestrator.snapshotState.status === 'BLOCKED' && h.orchestrator.snapshotState.activeMissionId === 'b', 3000, 'blocked on b');
+  assert.equal((await h.orchestrator.handleCommand({ command: 'skip' })).ok, true);
+  await h.done;
+  const state = await h.store.load();
+  assert.equal(state.status, 'COMPLETED');
+  assert.equal(state.missions.a.skipped, undefined);
+  assert.equal(state.missions.b.skipped, true);
+  assert.equal(state.missions.b.status, 'COMPLETED');
+  assert.equal(turnCount(worker), 3, 'b was skipped after one turn, c ran');
+  const types = (await h.store.readEvents()).map((e) => e.type);
+  assert.ok(types.includes('mission.skipped'));
+}));
+
+test('complete and skip are refused while a turn may run', () => withDirs(async (home, work) => {
+  const gate = deferred<void>();
+  const worker = new FakeWorkerAdapter([async () => { await gate.promise; return { finalResponse: 'done' }; }]);
+  const h = await start(home, work, makeConfig(), worker, new FakeSupervisorAdapter([{ decision: 'MISSION_COMPLETE' }]));
+  await waitFor(() => h.orchestrator.snapshotState.pendingTurn !== undefined, 3000, 'turn running');
+  for (const command of ['complete', 'skip']) {
+    const r = await h.orchestrator.handleCommand({ command });
+    assert.equal(r.ok, false);
+    assert.match((r as any).error, /The run is RUNNING/);
+  }
+  gate.resolve();
+  await h.done;
+}));

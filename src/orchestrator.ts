@@ -83,6 +83,9 @@ export const HELP_TEXT = `Commands:
   tell --raw <text>      Your own directive, approved verbatim, delivered at the next turn boundary
   approve <directive-id> Approve a proposed directive
   approve mission        Approve a pending mission transition (or accept a blocked read-only mission)
+  extend <n>             Add n turns to the current mission (1-100); leaves a turn-limit block
+  complete               End the current mission now if its completion checks pass (run stopped by a block or a pause)
+  skip                   End the current mission without completion checks; it is marked skipped
   reject <directive-id>  Reject a proposed directive
   directives             List directives
   pause                  Pause at the next safe boundary
@@ -503,8 +506,11 @@ export class Orchestrator {
     }
 
     await this.ensureMissionStarted(mission);
-    if (mission.execution.maxTurns && this.state.missionTurns >= mission.execution.maxTurns) {
-      return this.enterBlocked('MISSION_LIMIT', `Mission ${mission.id} reached its maxTurns (${mission.execution.maxTurns}).`);
+    const limit = this.missionTurnLimit(mission);
+    if (limit !== undefined && this.state.missionTurns >= limit) {
+      const extra = this.state.missions[mission.id]?.extraTurns ?? 0;
+      return this.enterBlocked('MISSION_LIMIT', `Mission ${mission.id} reached its maxTurns (${mission.execution.maxTurns}${extra ? ` + ${extra} added` : ''}). `
+        + `"extend <n>" adds turns, "complete" ends it if its completion checks pass, "skip" ends it without checks.`);
     }
 
     const gitBefore = await snapshot(this.options.workingDirectory);
@@ -1007,6 +1013,26 @@ export class Orchestrator {
     }
   }
 
+  /** execution.maxTurns plus the turns the human added; undefined: no per-mission limit. */
+  private missionTurnLimit(mission: Mission): number | undefined {
+    if (!mission.execution.maxTurns) return undefined;
+    return mission.execution.maxTurns + (this.state.missions[mission.id]?.extraTurns ?? 0);
+  }
+
+  /**
+   * Why the human cannot end the current mission now (undefined: they can).
+   * Only while nothing runs: blocked, failed or paused, with no turn result
+   * waiting for its review.
+   */
+  private humanEndRefusal(): string | undefined {
+    const s = this.state;
+    if (!this.currentMission()) return 'There is no current mission.';
+    if (s.status !== 'BLOCKED' && s.status !== 'FAILED' && s.status !== 'PAUSED') return `The run is ${s.status}: stop it with a pause first (or wait for a block).`;
+    if (s.blocked?.kind === 'MISSION_APPROVAL') return 'The mission already passed its checks: use "approve mission".';
+    if (s.pendingTurn) return `Turn ${s.pendingTurn.turnId} still waits for its review: resume first.`;
+    return undefined;
+  }
+
   private async completeMission(mission: Mission, extra?: (s: State) => void): Promise<void> {
     await this.mutate((s) => {
       extra?.(s);
@@ -1149,7 +1175,7 @@ export class Orchestrator {
       // The whole plan with each mission's progress (web console checklist).
       plan: this.config.sessions.map((session, si) => ({
         id: session.id, title: session.title ?? null, index: si + 1,
-        missions: session.missions.map((m, mi) => ({ id: m.id, title: m.title, index: mi + 1, status: s.missions[m.id]?.status ?? 'PENDING' }))
+        missions: session.missions.map((m, mi) => ({ id: m.id, title: m.title, index: mi + 1, status: s.missions[m.id]?.status ?? 'PENDING', ...(s.missions[m.id]?.skipped ? { skipped: true } : {}) }))
       })),
       missionTurns: s.missionTurns,
       totalTurns: s.totalTurns,
@@ -1244,6 +1270,58 @@ export class Orchestrator {
         });
         await this.emit('directive.approved', { id: content, author: directive.author });
         return { ok: true, data: { directiveId: content, message: 'Directive approved; it will be delivered at the next turn boundary.' } };
+      }
+      case 'extend': {
+        const n = Number(content);
+        if (!Number.isInteger(n) || n < 1 || n > 100) return { ok: false, error: 'Usage: extend <n> (1-100 turns)' };
+        const mission = this.currentMission();
+        if (!mission) return { ok: false, error: 'There is no current mission.' };
+        if (!mission.execution.maxTurns) return { ok: false, error: `Mission ${mission.id} has no maxTurns: nothing to extend.` };
+        const atLimit = this.state.status === 'BLOCKED' && this.state.blocked?.kind === 'MISSION_LIMIT';
+        await this.newHotPrompt('RESOLUTION', `extend mission ${mission.id} by ${n} turn(s)`, 'APPLIED');
+        await this.mutate((s) => {
+          const m = s.missions[mission.id] ?? { status: 'ACTIVE', turns: 0 };
+          s.missions[mission.id] = { ...m, extraTurns: (m.extraTurns ?? 0) + n };
+          if (atLimit) { s.status = 'RUNNING'; s.blocked = undefined; s.lastError = undefined; }
+        });
+        const limit = this.missionTurnLimit(mission)!;
+        await this.emit('mission.extended', { missionId: mission.id, added: n, limit });
+        if (atLimit) { await this.emit('runtime.resumed', { previousStatus: 'BLOCKED', kind: 'MISSION_LIMIT' }); this.wake(); }
+        return { ok: true, data: { message: `Mission ${mission.id}: limit now ${limit} turns (${this.state.missionTurns} used)${atLimit ? '; resuming' : ''}.` } };
+      }
+      case 'complete':
+      case 'skip': {
+        const refusal = this.humanEndRefusal();
+        if (refusal) return { ok: false, error: refusal };
+        const mission = this.currentMission()!;
+        const skip = command === 'skip';
+        if (!skip) {
+          const outputName = mission.execution.output;
+          if (outputName && !this.state.missions[mission.id]?.output) {
+            return { ok: false, error: `Mission ${mission.id} has not delivered its structured output "${outputName}": let the worker deliver it, or "skip".` };
+          }
+          const outcomes = await runVerifiers(
+            this.verifiers,
+            { workingDirectory: this.options.workingDirectory, mission, phase: 'completion' },
+            { gitClean: this.config.runtime.verifyGitCleanOnCompletion }
+          );
+          await this.emit('mission.verification', { missionId: mission.id, outcomes: outcomes.map((o) => ({ name: o.name, passed: o.passed })) });
+          const failed = outcomes.filter((o) => !o.passed);
+          if (failed.length) {
+            return { ok: false, error: `Completion checks failed, mission ${mission.id} not ended:\n${failed.map((o) => `- ${o.name}: ${o.output.slice(0, 500)}`).join('\n')}\nFix them, or "skip".` };
+          }
+        }
+        await this.newHotPrompt('RESOLUTION', skip ? `skip mission ${mission.id} (no completion checks)` : `complete mission ${mission.id} (completion checks passed)`, 'APPLIED');
+        if (skip) await this.emit('mission.skipped', { missionId: mission.id });
+        await this.completeMission(mission, (st) => {
+          if (skip) st.missions[mission.id] = { ...st.missions[mission.id], skipped: true };
+          st.blocked = undefined;
+          st.lastError = undefined;
+          st.pauseRequested = false;
+          if (st.status === 'BLOCKED' || st.status === 'FAILED' || st.status === 'PAUSED') st.status = 'RUNNING';
+        });
+        this.wake();
+        return { ok: true, data: { message: skip ? `Mission ${mission.id} skipped.` : `Mission ${mission.id} completed (checks passed).` } };
       }
       case 'reject': {
         const directive = this.state.directives.find((d) => d.id === content);

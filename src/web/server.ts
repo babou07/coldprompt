@@ -11,7 +11,7 @@ import type { Store } from '../store.js';
 import { APP_CSS, APP_JS, PAGE_HTML } from './page.js';
 
 /** Commands the page may send. Everything goes through the orchestrator's own validation. */
-const ALLOWED_COMMANDS = new Set(['status', 'directives', 'ask', 'tell', 'approve', 'reject', 'pause', 'resume', 'stop']);
+const ALLOWED_COMMANDS = new Set(['status', 'directives', 'ask', 'tell', 'approve', 'reject', 'pause', 'resume', 'stop', 'extend', 'complete', 'skip']);
 const HISTORY_EVENTS = 400;
 const MAX_BODY_BYTES = 64 * 1024;
 const TURN_ID = /^[A-Za-z0-9_-]{1,64}$/;

@@ -414,6 +414,10 @@ export interface MissionProgress {
   output?: { name: string; path: string; at: string };
   startedAt?: string;
   completedAt?: string;
+  /** Turns added by the human ("extend <n>") on top of execution.maxTurns. */
+  extraTurns?: number;
+  /** Ended by the human with "skip": no completion checks ran. */
+  skipped?: boolean;
 }
 
 export interface SessionProgress {
