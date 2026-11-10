@@ -12,7 +12,6 @@ priority order; each one is usable on its own.
 | 4. Triggers | To do |
 | 5. Milestone planner | To do |
 | 6. Dedicated `coldprompt` Linux user | To do |
-| 7. Operator tab | To do, after step 6 |
 
 ColdPrompt stays project-agnostic: no knowledge of KiCad, PCBs or any other
 tool of a target project. Project-specific actions are missions written in
@@ -130,7 +129,7 @@ without that.
 ## Step 6 — Dedicated `coldprompt` Linux user
 
 Run the whole ColdPrompt stack (orchestrator, web console, worker,
-supervisor, later the operator) as a dedicated user, so the kernel enforces
+supervisor) as a dedicated user, so the kernel enforces
 its limits, not only the tools' own sandboxes. Discussed on 2026-11-10.
 
 Why the whole stack: if only an agent runs as `coldprompt`, files it writes
@@ -158,26 +157,6 @@ stays within that user's rights.
 - Migration in one go: user and permissions, move, tools and logins, KiCad
   socket, units, a test run.
 
-## Step 7 — Operator tab
-
-A third tab in the web console: a Claude agent with write rights inside the
-workspace, to drive the work from a phone (fix a configuration, edit
-documents, commit), while the run is stopped, paused or blocked.
-
-- Runs as the `coldprompt` user (step 6); network cut except the model API.
-- Its mission and rights live in `~/.config/coldprompt/` (an AGENTS.md /
-  CLAUDE.md and a rights file), outside the workspace, so it cannot rewrite
-  them.
-- Changes to the "executable" keys of the plan (verification commands,
-  plugins, codexPath, sandbox and approval modes, supervisor permissions),
-  to `.git/hooks` and `.git/config` are proposals only.
-- Run actions (restart, reset, extend, complete, skip, worker directive,
-  resolution) and `git push` are proposals the user approves in the tab;
-  ColdPrompt executes them.
-- A backup before each operator session (a btrfs snapshot if available),
-  every file change shown as a diff with Revert, every action logged in the
-  run events and reported to the supervisor.
-- No writes to the target repository while a worker turn runs.
-- Lighter alternative kept in mind: read-only git tools for the supervisor's
-  answers and a YAML editor in the page.
-
+The operator tab once planned here (an agent with write rights driven from
+the phone) left the roadmap on 2026-11-10: it is a workstation controller,
+not a ColdPrompt feature (see ~/workspace/ideas.md).
