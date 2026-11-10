@@ -11,6 +11,8 @@ priority order; each one is usable on its own.
 | 3. Milestones and merge button | To do |
 | 4. Triggers | To do |
 | 5. Milestone planner | To do |
+| 6. Dedicated `coldprompt` Linux user | To do |
+| 7. Operator tab | To do, after step 6 |
 
 ColdPrompt stays project-agnostic: no knowledge of KiCad, PCBs or any other
 tool of a target project. Project-specific actions are missions written in
@@ -124,3 +126,58 @@ review report and the project's own ordering document (for Moscata:
 `docs/routing-branches.md`, R03 → R05 → R04…). The proposal reuses the
 existing proposals mechanism: the user edits or accepts it, nothing starts
 without that.
+
+## Step 6 — Dedicated `coldprompt` Linux user
+
+Run the whole ColdPrompt stack (orchestrator, web console, worker,
+supervisor, later the operator) as a dedicated user, so the kernel enforces
+its limits, not only the tools' own sandboxes. Discussed on 2026-11-10.
+
+Why the whole stack: if only an agent runs as `coldprompt`, files it writes
+(coldprompt.yaml, verification scripts, git hooks) are still executed by
+processes of the main user. Under one user, everything ColdPrompt executes
+stays within that user's rights.
+
+- User and group `coldprompt`; the main user is also a member. The workspace
+  is owned by `<user>:coldprompt`, setgid, with default ACLs `g:rwX`, so
+  files created by either side stay writable by both.
+- ColdPrompt itself and its state directory (`COLDPROMPT_HOME`, web token
+  included) move out of the workspace: an agent with write access to the
+  workspace must not be able to change ColdPrompt or its own limits.
+- `coldprompt` is not in the `docker` group (root-equivalent) and cannot read
+  the main user's home (`~/.ssh`, credentials).
+- Its own credentials: Codex and Claude logins, a GitHub deploy key limited
+  to the project repositories, its own copy of the mail skill if needed.
+- Git hooks: a global `core.hooksPath` for the main user, so hooks written in
+  the workspace never run under the main user.
+- Tools installed for `coldprompt` (node, codex, claude); systemd user units
+  with `loginctl enable-linger coldprompt`.
+- KiCad / Konnect: KiCad runs in the main user's desktop and its IPC socket
+  (`/tmp/kicad/api.sock`, mode 755) refuses other users. A launcher makes it
+  group-accessible after each KiCad start. This is the most fragile point.
+- Migration in one go: user and permissions, move, tools and logins, KiCad
+  socket, units, a test run.
+
+## Step 7 — Operator tab
+
+A third tab in the web console: a Claude agent with write rights inside the
+workspace, to drive the work from a phone (fix a configuration, edit
+documents, commit), while the run is stopped, paused or blocked.
+
+- Runs as the `coldprompt` user (step 6); network cut except the model API.
+- Its mission and rights live in `~/.config/coldprompt/` (an AGENTS.md /
+  CLAUDE.md and a rights file), outside the workspace, so it cannot rewrite
+  them.
+- Changes to the "executable" keys of the plan (verification commands,
+  plugins, codexPath, sandbox and approval modes, supervisor permissions),
+  to `.git/hooks` and `.git/config` are proposals only.
+- Run actions (restart, reset, extend, complete, skip, worker directive,
+  resolution) and `git push` are proposals the user approves in the tab;
+  ColdPrompt executes them.
+- A backup before each operator session (a btrfs snapshot if available),
+  every file change shown as a diff with Revert, every action logged in the
+  run events and reported to the supervisor.
+- No writes to the target repository while a worker turn runs.
+- Lighter alternative kept in mind: read-only git tools for the supervisor's
+  answers and a YAML editor in the page.
+
