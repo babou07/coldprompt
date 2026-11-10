@@ -116,6 +116,9 @@ test('interactive console (SSH/Termux style line I/O) reconnects after the orche
     await waitFor(() => text.includes('reconnecting'), 3000, 'disconnect notice');
     const h2 = await blockedHarness2(home.path, work.path);
     await waitFor(() => text.split('BLOCKED [SUPERVISOR]').length > 2, 5000, 'reconnected hello');
+    // Failed attempts while offline must not leave extra connections (each would print a hello).
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal((h2.server as any).clients.size, 1);
     input.write('resume use the safe path\n');
     await waitFor(() => text.includes('Resolution recorded'), 3000, 'resume ack');
     await h2.done;

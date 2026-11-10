@@ -146,21 +146,27 @@ export async function runInteractiveConsole(socketPath: string, options: Interac
 
   const attach = async (): Promise<void> => {
     for (let attempt = 0; !closing; attempt += 1) {
-      client = new ConsoleClient(socketPath);
-      client.onMessage = (message) => {
+      const candidate = new ConsoleClient(socketPath);
+      candidate.onMessage = (message) => {
         if (message.type === 'hello') { write(formatStatus(message.status)); rl.prompt(); }
         if (message.type === 'event') {
           const text = formatEvent(message.event);
           if (text) { write(text); rl.prompt(true); }
         }
       };
-      client.onClose = () => {
-        if (closing) return;
+      // Only an established connection starts a new reconnect loop; a failed
+      // attempt is retried by this loop (one loop, one connection). Otherwise
+      // each failed attempt added a loop, and they all connected at once.
+      let established = false;
+      candidate.onClose = () => {
+        if (closing || !established || client !== candidate) return;
         write('[disconnected; reconnecting…]');
         void attach();
       };
       try {
-        await client.connect();
+        await candidate.connect();
+        established = true;
+        client = candidate;
         return;
       } catch (error) {
         if (attempt === 0) write(`[cannot connect to ${socketPath}: ${(error as Error).message}; retrying…]`);
