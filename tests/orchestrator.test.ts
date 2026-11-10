@@ -524,3 +524,57 @@ test('state-changing commands are serialized and every HOT_PROMPT is persisted',
   gate.resolve();
   await h.done;
 }));
+
+test('a CONTINUE that sends the worker to a later mission is asked again once; the plan moves on itself', async () => {
+  const home = await tempDir(); const work = await tempDir();
+  try {
+    const config = makeConfig({
+      missions: [
+        { id: 'c01-regions', title: 'C01-M01 — Regions', prompt: { type: 'COLD_PROMPT', content: 'Map regions' }, completionCriteria: ['map'], execution: { readOnly: true } },
+        { id: 'c01-corridors', title: 'C01-M02 — Corridors', prompt: { type: 'COLD_PROMPT', content: 'Corridors' } },
+        { id: 'c01-report', title: 'C01-M03 — Report', prompt: { type: 'COLD_PROMPT', content: 'Report' } }
+      ]
+    });
+    const supervisor = new FakeSupervisorAdapter([
+      { decision: 'CONTINUE', workerInstruction: 'Mission C01-M01 is accepted. Proceed to C01-M02, the corridor study.' },
+      { decision: 'MISSION_COMPLETE', workerInstruction: '' },
+      { decision: 'CONTINUE', workerInstruction: 'Keep going; the report is mission 3.' },
+      { decision: 'MISSION_COMPLETE', workerInstruction: '' },
+      { decision: 'MISSION_COMPLETE', workerInstruction: '' }
+    ]);
+    const h = await start(home.path, work.path, config, new FakeWorkerAdapter(['regions', 'corridors', 'report']), supervisor);
+    const state = await h.done as any;
+    assert.equal(state.status, 'COMPLETED');
+    assert.equal(supervisor.evaluations.length, 5, 'one extra review per refused answer');
+    assert.match(supervisor.evaluations[1].correction!, /refers to c01-corridors \("C01-M02"\)[\s\S]*return MISSION_COMPLETE/);
+    assert.match(supervisor.evaluations[3].correction!, /refers to c01-report \("mission 3"\)/);
+    assert.equal(supervisor.evaluations[0].correction, undefined);
+    const corrected = (await h.store.readEvents()).filter((e) => e.type === 'review.corrected');
+    assert.equal(corrected.length, 2);
+  } finally {
+    await home.cleanup(); await work.cleanup();
+  }
+});
+
+test('a CONTINUE that only names the current mission or an earlier one is accepted', async () => {
+  const home = await tempDir(); const work = await tempDir();
+  try {
+    const config = makeConfig({
+      missions: [
+        { id: 'a', title: 'M1 — A', prompt: { type: 'COLD_PROMPT', content: 'A' } },
+        { id: 'b', title: 'M2 — B', prompt: { type: 'COLD_PROMPT', content: 'B' } }
+      ]
+    });
+    const supervisor = new FakeSupervisorAdapter([
+      { decision: 'MISSION_COMPLETE', workerInstruction: '' },
+      { decision: 'CONTINUE', workerInstruction: 'Reuse the map of M1 and mission 1; finish M2.' },
+      { decision: 'MISSION_COMPLETE', workerInstruction: '' }
+    ]);
+    const h = await start(home.path, work.path, config, new FakeWorkerAdapter(['a', 'b1', 'b2']), supervisor);
+    assert.equal((await h.done as any).status, 'COMPLETED');
+    assert.equal(supervisor.evaluations.length, 3);
+    assert.equal((await h.store.readEvents()).filter((e) => e.type === 'review.corrected').length, 0);
+  } finally {
+    await home.cleanup(); await work.cleanup();
+  }
+});

@@ -158,13 +158,23 @@ even an interrupted first turn keeps its thread.
   of secret-looking environment variables are masked.
 
 - **Web console.** A separate process that connects to the console socket;
-  it cannot do more than `coldprompt console` (command allowlist, same
-  orchestrator validation). Bearer token from a 0600 file, compared in
+  its commands are those of `coldprompt console` (command allowlist, same
+  orchestrator validation). Outside the socket it only starts or restarts
+  the run unit (`systemctl --user`, with `--run-unit`) and archives or resets
+  the stopped run (`src/archive.ts`, under the store lock); it never touches
+  the target repository. Bearer token from a 0600 file, compared in
   constant time; no cookies and JSON-only POSTs, so no CSRF; strict CSP
   (`'self'` only) and all data rendered as text. Live Codex activity comes
   from `worker.progress` events (SDK `item.*` stream, outputs clipped);
   they are persisted, so a reconnecting page replays the last 400 events.
   Default bind is localhost; remote access through `tailscale serve`.
+- **Mission boundaries belong to the plan.** The supervisor ends a mission
+  with MISSION_COMPLETE; the orchestrator sends the next one with its own
+  permissions. A CONTINUE/CLARIFY whose instruction names a later mission
+  (id, title code such as "C01-M02", or "mission N") is refused once and the
+  supervisor is asked again with the reason (event `review.corrected`); the
+  second answer stands. Without this, a read-only mission stayed active while
+  the worker did the next missions' work and could not write their files.
 - **Plan chaining.** Mission outputs are fenced JSON blocks parsed from the
   worker's final answer (`src/outputs.ts`), capped at 200k characters and
   redacted before storage; they feed later prompts but never decide on a

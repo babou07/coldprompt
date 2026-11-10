@@ -746,24 +746,37 @@ export class Orchestrator {
     const deliveredDirectives = this.state.directives.filter((d) => pending.deliveredDirectiveIds.includes(d.id)).map((d) => d.content);
     const rejected = this.state.lastError?.kind === 'COMPLETION_REJECTED' ? this.state.lastError.message : undefined;
     let review: Review;
+    let correction: string | undefined;
     try {
-      review = await this.supervisorCall('evaluate', (signal) => this.options.supervisor.evaluateTurn({
-        mission,
-        missionIndex: this.config.missions.indexOf(mission),
-        missionCount: this.config.missions.length,
-        session: { id: mission.session, index: this.config.sessions.indexOf(this.sessionOf(mission)), count: this.config.sessions.length },
-        turnId: pending.turnId,
-        missionTurn: pending.missionTurn,
-        workerPrompt: pending.prompt,
-        workerResult: artifact.result,
-        gitBefore: pending.gitBefore,
-        gitAfter: pending.gitAfter ?? pending.gitBefore,
-        commits: pending.commits ?? [],
-        verification: pending.verification ?? [],
-        deliveredDirectives,
-        resolution: pending.resolution,
-        previousCompletionRejected: rejected
-      }, { signal }));
+      for (let attempt = 0; ; attempt += 1) {
+        review = await this.supervisorCall('evaluate', (signal) => this.options.supervisor.evaluateTurn({
+          mission,
+          missionIndex: this.config.missions.indexOf(mission),
+          missionCount: this.config.missions.length,
+          session: { id: mission.session, index: this.config.sessions.indexOf(this.sessionOf(mission)), count: this.config.sessions.length },
+          turnId: pending.turnId,
+          missionTurn: pending.missionTurn,
+          workerPrompt: pending.prompt,
+          workerResult: artifact.result,
+          gitBefore: pending.gitBefore,
+          gitAfter: pending.gitAfter ?? pending.gitBefore,
+          commits: pending.commits ?? [],
+          verification: pending.verification ?? [],
+          deliveredDirectives,
+          resolution: pending.resolution,
+          previousCompletionRejected: rejected,
+          correction
+        }, { signal }));
+        const later = attempt === 0 ? this.laterMissionReference(mission, review) : undefined;
+        if (!later) break;
+        // The supervisor moved on by itself (CONTINUE toward a later mission): the
+        // current mission would stay active, with its permissions. Ask once more.
+        correction = `Your decision was ${review.decision}, but its workerInstruction refers to ${later}, a later mission of the plan. `
+          + `If the current mission's completion criteria are met, return MISSION_COMPLETE (the plan then sends the next mission). `
+          + `Otherwise, return an instruction that stays within the current mission (${mission.id}).`;
+        await this.emit('review.corrected', { turnId: pending.turnId, decision: review.decision, reference: later });
+        this.log(`review ${pending.turnId}: ${review.decision} refers to ${later}; asking the supervisor again`);
+      }
     } catch (error) {
       if (this.stopping && classifyError(error) === 'CANCELLED') return; // stays WORKER_DONE, review re-runs on restart
       const kind = classifyError(error);
@@ -785,6 +798,28 @@ export class Orchestrator {
     await this.emit('review.completed', { turnId: pending.turnId, decision: review.decision, reason: review.reason, reviewRef });
     this.log(`review ${pending.turnId}: ${review.decision} — ${review.reason}`);
     await this.applyPending();
+  }
+
+  /**
+   * A later mission named in a CONTINUE/CLARIFY instruction: its id, the code
+   * that starts its title ("C01-M02 — ..."), or "mission N" past the current one.
+   */
+  private laterMissionReference(mission: Mission, review: Review): string | undefined {
+    if (review.decision !== 'CONTINUE' && review.decision !== 'CLARIFY') return undefined;
+    const text = review.workerInstruction ?? '';
+    const index = this.config.missions.indexOf(mission);
+    const escape = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const later of this.config.missions.slice(index + 1)) {
+      const code = /^([A-Za-z0-9][A-Za-z0-9_.-]{1,23})\s+[—:-]/.exec(later.title ?? '')?.[1];
+      for (const key of [later.id, ...(code && /\d/.test(code) ? [code] : [])]) {
+        if (new RegExp(`(^|[^A-Za-z0-9_-])${escape(key)}($|[^A-Za-z0-9_-])`, 'i').test(text)) return `${later.id} ("${key}")`;
+      }
+    }
+    for (const m of text.matchAll(/\bmission\s+(\d+)\b/gi)) {
+      const n = Number(m[1]);
+      if (n > index + 1 && n <= this.config.missions.length) return `${this.config.missions[n - 1].id} ("${m[0]}")`;
+    }
+    return undefined;
   }
 
   private async applyPending(): Promise<void> {

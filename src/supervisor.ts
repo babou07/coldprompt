@@ -21,6 +21,8 @@ export interface EvaluationContext {
   resolution?: string;
   /** Present when a MISSION_COMPLETE was rejected by deterministic checks. */
   previousCompletionRejected?: string;
+  /** Present when this review is asked again because the previous answer broke a plan rule. */
+  correction?: string;
 }
 
 export interface InteractionRequest {
@@ -139,6 +141,13 @@ Decisions:
   "done" is NOT evidence. Deterministic checks run afterwards and may reject completion.
 - STOP: unrecoverable failure or unacceptable risk.
 
+The plan, not you, moves the worker from one mission to the next. When the current mission's
+completion criteria are met, return MISSION_COMPLETE: ColdPrompt then runs the completion checks
+and sends the next mission itself, with its own permissions (a read-only mission keeps a read-only
+sandbox until it is completed). Never tell the worker to start, prepare or do the work of a later
+mission in a CONTINUE or CLARIFY instruction, and never change the file paths, scope or read-only
+setting a mission prescribes.
+
 Human HOT_PROMPT questions may also arrive. Answer them; you may propose a worker directive, but it
 will only be delivered if the human explicitly approves it. Never assume a proposal is approved.`;
 
@@ -162,6 +171,7 @@ export function buildEvaluationPrompt(ctx: EvaluationContext, maxOutputChars: nu
     ...(ctx.resolution ? [`## Human RESOLUTION delivered this turn`, ctx.resolution, ``] : []),
     ...(ctx.deliveredDirectives.length ? [`## Approved human directives delivered this turn`, ...ctx.deliveredDirectives.map((d) => `- ${d}`), ``] : []),
     ...(ctx.previousCompletionRejected ? [`## Previous MISSION_COMPLETE was rejected by deterministic checks`, ctx.previousCompletionRejected, ``] : []),
+    ...(ctx.correction ? [`## Your previous answer for this turn was refused`, ctx.correction, ``] : []),
     `## Instruction sent to the worker`,
     truncate(ctx.workerPrompt, 4000),
     ``,
@@ -189,7 +199,7 @@ export function buildEvaluationPrompt(ctx: EvaluationContext, maxOutputChars: nu
 
 export function buildInteractionPrompt(req: InteractionRequest): string {
   const header = req.intent === 'QUESTION'
-    ? `# HOT_PROMPT QUESTION from the human operator\nAnswer the question. Do not assume any change to the worker. If useful, propose a directive (it requires explicit human approval).`
+    ? `# HOT_PROMPT QUESTION from the human operator\nAnswer the message. Do not assume any change to the worker. If the human asks for something to be done by the worker, or if an instruction to the worker would resolve the situation (a block included), put that instruction, self-contained, in proposedDirective and explain it in answer; otherwise set it to null. It is delivered only after explicit human approval.`
     : `# HOT_PROMPT DIRECTIVE from the human operator\nPrepare a precise, self-contained instruction for the worker that implements the human's intent. Put it in proposedDirective and explain it in answer. It will be delivered only after explicit human approval.`;
   return [
     header,
