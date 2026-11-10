@@ -42,6 +42,18 @@ export interface WebServerOptions {
     check: () => Promise<{ archivable: boolean; reason?: string }>;
     run: () => Promise<{ ok: true; directory: string } | { ok: false; error: string }>;
   };
+  /**
+   * Restarts the running orchestrator (e.g. `systemctl --user restart coldprompt-run`):
+   * graceful stop after the current turn, then a start that reloads the YAML files.
+   */
+  restartRun?: () => Promise<{ ok: boolean; message: string }>;
+  /** Plan files changed since the run started (the running orchestrator still uses the old ones). */
+  planChanges?: () => Promise<string[]>;
+  /** Archives the stopped run as "reset" so the plan starts again from its first mission. */
+  reset?: {
+    check: () => Promise<{ resettable: boolean; reason?: string; commits: string[] }>;
+    run: () => Promise<{ ok: true; directory: string } | { ok: false; error: string }>;
+  };
   log?: (message: string) => void;
   /** Reconnect delay to the orchestrator socket. */
   reconnectMs?: number;
@@ -83,6 +95,7 @@ export class WebServer {
   private connected = false;
   private closing = false;
   private starting = false;
+  private restarting = false;
   private statusTimer?: NodeJS.Timeout;
   private heartbeat?: NodeJS.Timeout;
   private readonly expected: Buffer;
@@ -221,6 +234,28 @@ export class WebServer {
       try { result = await this.options.startRun(); } finally { this.starting = false; }
       return this.json(res, result.ok ? 200 : 500, { ok: result.ok, data: { message: result.message }, error: result.ok ? undefined : result.message });
     }
+    if (req.method === 'POST' && path === '/api/restart') {
+      if (!(await this.body(req, res))) return;
+      if (!this.options.restartRun) return this.json(res, 501, { ok: false, error: 'Restarting the run is not configured (coldprompt web --run-unit)' });
+      if (!this.connected) return this.json(res, 409, { ok: false, error: 'ColdPrompt is not running: use Start run' });
+      if (this.restarting || this.starting) return this.json(res, 409, { ok: false, error: 'A start or restart is already in progress' });
+      this.restarting = true;
+      this.options.log?.('web: restart requested');
+      // The stop waits for the current turn: answer now, report the outcome as an event.
+      void this.options.restartRun()
+        .catch((error) => ({ ok: false, message: errorMessage(error) }))
+        .then((result) => {
+          this.options.log?.(`web: restart ${result.ok ? 'done' : 'failed'}: ${result.message}`);
+          this.broadcast('restart', result);
+        })
+        .finally(() => { this.restarting = false; });
+      return this.json(res, 202, { ok: true, data: { message: 'Restart requested: the current turn finishes first, then the run restarts with the YAML files reloaded.' } });
+    }
+    if (req.method === 'GET' && path === '/api/config-changes') {
+      if (!this.options.planChanges) return this.json(res, 200, { ok: true, data: { files: [] } });
+      return this.json(res, 200, { ok: true, data: { files: await this.options.planChanges().catch(() => []) } });
+    }
+    if (path === '/api/reset') return this.resetApi(req, res);
     if (path.startsWith('/api/proposals')) return this.proposalsApi(req, res, path);
     if (path === '/api/archive') return this.archiveApi(req, res);
     const turn = /^\/api\/turn\/([^/]+)$/.exec(path);
@@ -271,6 +306,36 @@ export class WebServer {
     this.options.log?.(`web: plan archived to ${result.directory}`);
     this.broadcast('archived', { directory: result.directory });
     return this.json(res, 200, { ok: true, data: { message: `Plan archived to ${result.directory}`, directory: result.directory } });
+  }
+
+  // -------------------------------------------------------------------------
+  // Run reset
+
+  private async resetApi(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const r = this.options.reset;
+    if (!r) return this.json(res, 501, { ok: false, error: 'Reset is not configured' });
+    const busy = this.connected || this.starting || this.restarting;
+    if (req.method === 'GET') {
+      if (busy) return this.json(res, 200, { ok: true, data: { resettable: false, reason: 'ColdPrompt is running', commits: [] } });
+      return this.json(res, 200, { ok: true, data: await r.check() });
+    }
+    if (req.method !== 'POST') return this.json(res, 404, { ok: false, error: 'Not found' });
+    const body = await this.body(req, res);
+    if (!body) return;
+    if (busy) return this.json(res, 409, { ok: false, error: 'ColdPrompt is running: stop it first' });
+    const result = await r.run();
+    if (!result.ok) return this.json(res, 409, { ok: false, error: result.error });
+    this.status = undefined;
+    this.options.log?.(`web: run reset, archived to ${result.directory}`);
+    let message = `Run reset (archived to ${result.directory})`;
+    let started: { ok: boolean; message: string } | undefined;
+    if (body.start === true && this.options.startRun) {
+      this.starting = true;
+      try { started = await this.options.startRun(); } finally { this.starting = false; }
+      message += started.ok ? `; ${started.message}` : '; the start failed';
+    }
+    this.broadcast('archived', { directory: result.directory });
+    return this.json(res, 200, { ok: true, data: { message, directory: result.directory, started } });
   }
 
   // -------------------------------------------------------------------------
@@ -375,7 +440,7 @@ export class WebServer {
     res.writeHead(200, { ...SECURITY_HEADERS, 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no', Connection: 'keep-alive' });
     const events = await this.options.store.readEvents().catch(() => []);
     const history = events.slice(-HISTORY_EVENTS).map((e) => ({ type: e.type, data: e.data, at: e.timestamp }));
-    this.write(res, 'hello', { project: this.options.projectName, connected: this.connected, canStart: Boolean(this.options.startRun), canArchive: Boolean(this.options.archive), proposals: Boolean(this.options.proposals), status: this.status ?? null, history });
+    this.write(res, 'hello', { project: this.options.projectName, connected: this.connected, canStart: Boolean(this.options.startRun), canArchive: Boolean(this.options.archive), canRestart: Boolean(this.options.restartRun), canReset: Boolean(this.options.reset), proposals: Boolean(this.options.proposals), status: this.status ?? null, history });
     this.streams.add(res);
     res.on('close', () => this.streams.delete(res));
   }

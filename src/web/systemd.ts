@@ -87,6 +87,8 @@ export interface StartUnitOptions {
   pollMs?: number;
   /** Turns a message into one safe to show (secrets masked). */
   redact?: (text: string) => string;
+  /** `restart`: stops the running unit first (graceful: the current turn ends), then starts it. */
+  verb?: 'start' | 'restart';
 }
 
 /**
@@ -96,16 +98,17 @@ export interface StartUnitOptions {
  */
 export async function startUnit(unit: string, options: StartUnitOptions): Promise<{ ok: boolean; message: string }> {
   const clean = options.redact ?? ((text: string) => text);
+  const verb = options.verb ?? 'start';
   const run = async (args: string[]): Promise<string> => {
     try { return (await options.exec('systemctl', ['--user', ...args])).stdout.trim(); } catch (error) {
       return String((error as { stdout?: string }).stdout ?? '').trim();
     }
   };
   try {
-    await options.exec('systemctl', ['--user', 'start', unit]);
+    await options.exec('systemctl', ['--user', verb, unit]);
   } catch (error) {
     const err = error as { stderr?: string; message?: string };
-    return { ok: false, message: clean(`systemctl --user start ${unit} failed: ${(err.stderr || err.message || '').trim()}`) };
+    return { ok: false, message: clean(`systemctl --user ${verb} ${unit} failed: ${(err.stderr || err.message || '').trim()}`) };
   }
   const deadline = Date.now() + (options.watchMs ?? 8000);
   while (Date.now() < deadline) {
@@ -122,5 +125,5 @@ export async function startUnit(unit: string, options: StartUnitOptions): Promis
     }
     await new Promise((r) => setTimeout(r, options.pollMs ?? 500));
   }
-  return { ok: true, message: `Started ${unit}` };
+  return { ok: true, message: `${verb === 'restart' ? 'Restarted' : 'Started'} ${unit}` };
 }

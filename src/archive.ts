@@ -1,4 +1,4 @@
-import { copyFile, mkdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, normalize, resolve } from 'node:path';
 import type { Store } from './store.js';
 import type { Config, State } from './types.js';
@@ -14,7 +14,8 @@ export const ARCHIVE_DIRECTORY = 'archive';
 export const PLAN_SNAPSHOT_DIRECTORY = 'plan';
 const RUN_ENTRIES = ['state.json', 'events.jsonl', 'turns', 'outputs', PLAN_SNAPSHOT_DIRECTORY];
 
-export type ArchiveReason = 'manual' | 'forced' | 'auto';
+/** manual / forced: `archive` (button or CLI); auto: replaced finished plan at start; reset: run reset to start again. */
+export type ArchiveReason = 'manual' | 'forced' | 'auto' | 'reset';
 
 async function exists(path: string): Promise<boolean> {
   try { await stat(path); return true; } catch { return false; }
@@ -134,8 +135,10 @@ export async function archiveCheck(store: Store, config?: Config): Promise<{ arc
 /**
  * Archives the run as one exclusive owner of the state directory (refused
  * while the orchestrator runs). Without `force`, only a finished plan.
+ * `reset` archives any run (finished or not) with the reason "reset", so the
+ * plan starts again from its first mission at the next start.
  */
-export async function archivePlan(store: Store, options: { configPath?: string; config?: Config; force?: boolean }): Promise<{ ok: true; directory: string } | { ok: false; error: string }> {
+export async function archivePlan(store: Store, options: { configPath?: string; config?: Config; force?: boolean; reset?: boolean }): Promise<{ ok: true; directory: string } | { ok: false; error: string }> {
   try {
     await store.acquireLock();
   } catch (error) {
@@ -144,10 +147,46 @@ export async function archivePlan(store: Store, options: { configPath?: string; 
   try {
     if (!(await hasRun(store))) return { ok: false, error: 'There is no run to archive' };
     const reason = notFinishedReason(await store.load(), Boolean(options.config?.finalize));
-    if (reason && !options.force) return { ok: false, error: `Not archived: ${reason}. Use "coldprompt archive --force" to archive it anyway.` };
-    const directory = await archiveRun(store, { reason: reason ? 'forced' : 'manual', configPath: options.configPath, config: options.config });
+    if (reason && !options.force && !options.reset) return { ok: false, error: `Not archived: ${reason}. Use "coldprompt archive --force" to archive it anyway.` };
+    const directory = await archiveRun(store, { reason: options.reset ? 'reset' : reason ? 'forced' : 'manual', configPath: options.configPath, config: options.config });
     return { ok: true, directory };
   } finally {
     await store.releaseLock();
   }
+}
+
+/** Commits recorded by the worker turns of the run in the state directory, oldest first. */
+export async function runCommits(store: Store): Promise<string[]> {
+  const dir = join(store.directory, 'turns');
+  let names: string[] = [];
+  try { names = (await readdir(dir)).filter((n) => n.endsWith('.worker.json')).sort(); } catch { return []; }
+  const commits: string[] = [];
+  for (const name of names) {
+    try {
+      const turn = JSON.parse(await readFile(join(dir, name), 'utf8')) as { commits?: unknown };
+      if (Array.isArray(turn.commits)) for (const c of turn.commits) if (typeof c === 'string' && !commits.includes(c)) commits.push(c);
+    } catch { /* unreadable turn: skip */ }
+  }
+  return commits;
+}
+
+/**
+ * Plan files (coldprompt.yaml and the current session files) that differ from
+ * the snapshot taken when the run started: the running orchestrator still uses
+ * the old ones until it restarts. Empty when there is no snapshot.
+ */
+export async function planChanges(store: Store, configPath: string, config?: Config): Promise<string[]> {
+  const snapshotDir = join(store.directory, PLAN_SNAPSHOT_DIRECTORY);
+  if (!(await exists(snapshotDir))) return [];
+  const read = (path: string) => readFile(path).then((b) => b.toString('utf8'), () => undefined);
+  const base = dirname(resolve(configPath));
+  const pairs: Array<[string, string, string]> = [['coldprompt.yaml', resolve(configPath), join(snapshotDir, 'coldprompt.yaml')]];
+  for (const s of config?.sessions ?? []) {
+    if (s.file) pairs.push([s.file, resolve(base, s.file), join(snapshotDir, snapshotName(s.file))]);
+  }
+  const changed: string[] = [];
+  for (const [name, current, saved] of pairs) {
+    if ((await read(current)) !== (await read(saved))) changed.push(name);
+  }
+  return changed;
 }

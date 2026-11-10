@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { loadConfig, resolveConfigPath, resolveWorkingDirectory } from './config.js';
 import { Store } from './store.js';
-import { archiveCheck, archivePlan } from './archive.js';
+import { archiveCheck, archivePlan, hasRun, notFinishedReason, planChanges, runCommits } from './archive.js';
 import { Orchestrator, HELP_TEXT } from './orchestrator.js';
 import { snapshot } from './git.js';
 import { buildVerifiers, configDirectoryOf, readOnlyCompletionChecks } from './verification.js';
@@ -38,6 +38,9 @@ const USAGE = `Usage: coldprompt <command>
   archive [--force]   Move the finished run (state, events, turns, outputs, plan
                       snapshot) to <COLDPROMPT_HOME>/archive/ so the next plan starts
                       fresh; --force also archives an unfinished run
+  reset               Archive the stopped run (reason "reset"), finished or not, so the
+                      plan starts again from its first mission; the repository and the
+                      commits the run made are not touched
 
 Environment: COLDPROMPT_CONFIG (coldprompt.yaml), COLDPROMPT_HOME (.coldprompt next to the config).
 A session file (listed under "sessions:" in coldprompt.yaml) is one worker thread
@@ -216,6 +219,15 @@ function option(name: string): string | undefined {
 const DEFAULT_WEB_PORT = 8787;
 const DEFAULT_RUN_UNIT = 'coldprompt-run.service';
 
+/** "<short id> <subject>" for each commit, as far as the repository still knows them. */
+async function describeCommits(config: Config | undefined, commits: string[]): Promise<string[]> {
+  if (!config) return commits;
+  const cwd = resolveWorkingDirectory(config, configPath);
+  return Promise.all(commits.map(async (c) => {
+    try { return (await exec('git', ['log', '-1', '--format=%h %s', c], { cwd })).stdout.trim() || c; } catch { return c; }
+  }));
+}
+
 async function web(): Promise<number> {
   const host = option('--host') ?? process.env.COLDPROMPT_WEB_HOST ?? '127.0.0.1';
   const port = Number(option('--port') ?? process.env.COLDPROMPT_WEB_PORT ?? DEFAULT_WEB_PORT);
@@ -234,6 +246,18 @@ async function web(): Promise<number> {
   const server = new WebServer({
     store, socketPath: store.socketPath, host, port, token, projectName, log, proposals,
     startRun: runUnit ? () => startUnit(runUnit, { exec: (file, args) => exec(file, args), redact }) : undefined,
+    restartRun: runUnit ? () => startUnit(runUnit, { exec: (file, args) => exec(file, args), redact, verb: 'restart' }) : undefined,
+    planChanges: async () => planChanges(store, configPath, await loadConfig(configPath).catch(() => undefined)),
+    reset: {
+      check: async () => {
+        if (!(await hasRun(store))) return { resettable: false, reason: 'there is no run to reset', commits: [] };
+        const config = await loadConfig(configPath).catch(() => undefined);
+        // A finished plan is archived instead (Archive plan).
+        if (!notFinishedReason(await store.load(), Boolean(config?.finalize))) return { resettable: false, reason: 'the plan is finished: archive it', commits: [] };
+        return { resettable: true, commits: await describeCommits(config, await runCommits(store)) };
+      },
+      run: async () => archivePlan(store, { configPath, config: await loadConfig(configPath).catch(() => undefined), reset: true })
+    },
     archive: {
       check: async () => archiveCheck(store, await loadConfig(configPath).catch(() => undefined)),
       run: async () => archivePlan(store, { configPath, config: await loadConfig(configPath).catch(() => undefined) })
@@ -334,6 +358,16 @@ async function main(): Promise<number> {
       const result = await archivePlan(store, { configPath, config, force: args.includes('--force') });
       if (!result.ok) { console.error(result.error); return 1; }
       console.log(`archived to ${result.directory}`);
+      return 0;
+    }
+    case 'reset': {
+      const config = await loadConfig(configPath).catch(() => undefined);
+      const commits = (await hasRun(store)) ? await describeCommits(config, await runCommits(store)) : [];
+      const result = await archivePlan(store, { configPath, config, reset: true });
+      if (!result.ok) { console.error(result.error); return 1; }
+      console.log(`run reset: archived to ${result.directory}`);
+      if (commits.length) console.log(`commits made by this run (left as they are):\n${commits.map((c) => `  ${c}`).join('\n')}`);
+      console.log('the next "coldprompt run" (or Start run) starts the plan from its first mission');
       return 0;
     }
     case 'events': {

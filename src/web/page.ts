@@ -24,11 +24,14 @@ export const PAGE_HTML = `<!doctype html>
   <div id="menu" class="menu">
     <div class="actions">
       <span id="run-actions" class="group"><button data-cmd="pause" class="link" title="Pause at the next safe boundary">Pause</button><span class="sep">|</span>
-      <button data-cmd="stop" class="link danger" title="Stop gracefully after the current turn">Stop after this turn</button><span class="sep">|</span></span>
+      <button data-cmd="stop" class="link danger" title="Stop gracefully after the current turn">Stop after this turn</button><span class="sep">|</span>
+      <span id="restart-group" hidden><button id="restart-run" class="link" title="Stop after the current turn, then start again with the YAML files reloaded; progress is kept">Restart</button><span class="sep">|</span></span></span>
       <button id="logout" class="link" title="Forget the access token on this device">Forget token</button>
       <span id="start-actions" class="group" hidden><span class="sep">|</span><button id="start-run" class="link" title="Start the run (it reloads the YAML files)">Start run</button></span>
       <span id="archive-actions" class="group" hidden><span class="sep">|</span><button id="archive-plan" class="link" title="Move this finished plan to .coldprompt/archive/ so the next plan starts fresh">Archive plan</button></span>
+      <span id="reset-actions" class="group" hidden><span class="sep">|</span><button id="reset-run" class="link danger" title="Archive this run as reset and start the plan again from its first mission; the repository is not touched">Reset run</button></span>
     </div>
+    <div id="config-changed" class="small" hidden></div>
     <div id="plan" class="plan" aria-label="progress"></div>
     <button id="plan-approve" class="primary" disabled>Nothing to approve</button>
     <div id="proposals" class="proposals" hidden>
@@ -123,6 +126,7 @@ pre{background:var(--code);border-radius:8px;padding:8px 10px;overflow:auto;whit
 .actions{display:flex;flex-wrap:wrap;align-items:center;gap:2px 8px;padding-bottom:8px;border-bottom:1px solid var(--line)}
 .sep{color:var(--muted)}
 .actions .group{display:contents}
+#config-changed{color:var(--warn);margin:4px 0}
 #start-msg{white-space:pre-wrap;word-break:break-word;margin:6px 0 0;max-height:40vh;overflow:auto}
 button.link.danger{color:var(--bad)}
 .plan{max-height:min(30vh,220px);overflow-y:auto;overscroll-behavior:contain;font-size:13px;padding-right:4px}
@@ -199,6 +203,8 @@ let status = null;
 let connected = false;
 let canStart = false;
 let canArchive = false;
+let canRestart = false;
+let canReset = false;
 let proposalsEnabled = false;
 let follow = true;
 let streamAbort = null;
@@ -289,6 +295,8 @@ function handle(name, data) {
     follow = keepFollow; scrollEnd(true);
     canStart = data.canStart === true;
     canArchive = data.canArchive === true;
+    canRestart = data.canRestart === true;
+    canReset = data.canReset === true;
     proposalsEnabled = data.proposals === true;
     if (proposalsEnabled) loadProposals();
     setConn(data.connected);
@@ -296,6 +304,10 @@ function handle(name, data) {
   } else if (name === 'status') renderStatus(data);
   else if (name === 'connection') setConn(data.connected);
   else if (name === 'archived') location.reload();
+  else if (name === 'restart') {
+    if (data.ok) toast(data.message);
+    else { $('#start-msg').textContent = data.message; $('#start-msg').hidden = false; toast('Restart failed', true); }
+  }
   else if (name === 'event') { renderEvent(data); scrollEnd(); }
 }
 
@@ -306,10 +318,37 @@ function setConn(value, webDown) {
   $('#offline').hidden = value || webDown;
   $('#run-actions').hidden = !value;
   $('#start-actions').hidden = value || webDown || !canStart;
+  $('#restart-group').hidden = !value || !canRestart;
   $('#offline-hint').hidden = !canStart;
   if (value) $('#start-msg').hidden = true;
   if (!value) { $('#badge').textContent = webDown ? 'offline' : 'stopped'; $('#badge').className = 'badge'; }
   refreshArchive(value || webDown);
+  refreshReset(value || webDown);
+  refreshConfigChanges();
+}
+
+/** "Reset run" is shown only while stopped, for a run that is not a finished plan. */
+let resetCommits = [];
+async function refreshReset(hide) {
+  const group = $('#reset-actions');
+  if (hide || !canReset) { group.hidden = true; return; }
+  try {
+    const r = await api('/api/reset');
+    resetCommits = r.ok ? r.data.commits || [] : [];
+    group.hidden = !(r.ok && r.data.resettable && !connected);
+  } catch { group.hidden = true; }
+}
+
+/** Warns when the YAML files changed since the run started (they apply only after a restart). */
+async function refreshConfigChanges() {
+  const box = $('#config-changed');
+  if (!connected) { box.hidden = true; return; }
+  try {
+    const r = await api('/api/config-changes');
+    const files = r.ok ? r.data.files : [];
+    box.textContent = files.length ? 'Changed since the run started (not applied yet): ' + files.join(', ') + '. ' + (canRestart ? 'Restart to apply.' : 'Restart the run to apply.') : '';
+    box.hidden = !files.length;
+  } catch { box.hidden = true; }
 }
 
 /** "Archive plan" is shown only while stopped, for a finished plan. */
@@ -711,6 +750,35 @@ document.addEventListener('DOMContentLoaded', () => {
       else { $('#start-msg').textContent = r.error; $('#start-msg').hidden = false; toast('Start failed', true); }
     } catch (e) { toast(e.message, true); }
     finally { b.disabled = false; b.textContent = 'Start run'; }
+  };
+  setInterval(() => { if (connected) refreshConfigChanges(); }, 30000);
+  $('#restart-run').onclick = async () => {
+    if (!confirm('Restart ColdPrompt? The current turn finishes first, then the run starts again with the YAML files reloaded. Progress is kept.')) return;
+    const b = $('#restart-run');
+    b.disabled = true;
+    try {
+      const r = await api('/api/restart', {});
+      if (r.ok) toast(r.data.message); else toast(r.error, true);
+    } catch (e) { toast(e.message, true); }
+    finally { b.disabled = false; }
+  };
+  $('#reset-run').onclick = async () => {
+    const commits = resetCommits.length
+      ? '\n\nCommits made by this run stay as they are:\n' + resetCommits.map((c) => '  ' + c).join('\n')
+      : '';
+    if (!confirm('Reset the run? It is archived (.coldprompt/archive/, reason "reset") and the plan starts again from its first mission, with the YAML files as they are then. The repository is not touched.' + commits)) return;
+    const startNow = canStart && confirm('Start the run now?');
+    const b = $('#reset-run');
+    b.disabled = true;
+    try {
+      const r = await api('/api/reset', { start: startNow });
+      if (r.ok) {
+        toast(r.data.message);
+        if (r.data.started && !r.data.started.ok) { $('#start-msg').textContent = r.data.started.message; $('#start-msg').hidden = false; }
+        else setTimeout(() => location.reload(), 800);
+      } else toast(r.error, true);
+    } catch (e) { toast(e.message, true); }
+    finally { b.disabled = false; }
   };
   $('#archive-plan').onclick = async () => {
     if (!confirm('Archive the finished plan? Its state, events, turns and outputs move to .coldprompt/archive/; the next Start run begins a new plan with the YAML files as they are then.')) return;

@@ -169,6 +169,12 @@ then:
   plan is finished), or `coldprompt archive`, archives the plan without
   starting anything. `coldprompt archive --force` also archives an unfinished
   run.
+- **Reset run** in the web panel (shown while the run is stopped and the plan
+  is not finished), or `coldprompt reset`, archives the run with the reason
+  `reset` and lets the plan start again from its first mission, e.g. after a
+  block that was fixed outside ColdPrompt. The panel can start the run right
+  after. The repository is never touched: commits the run made are listed
+  before the confirmation and left as they are.
 
 An archive is `<COLDPROMPT_HOME>/archive/<date>-<first>--<last session>/`:
 the run files, a copy of `coldprompt.yaml` and of the session files as they
@@ -289,15 +295,20 @@ the console socket, like `coldprompt console`.
   paste the token in the page. It is sent as a Bearer header, never a
   cookie; the token stays in the browser's local storage until
   "Forget token".
-- Header panel (⋯): `Pause | Stop after this turn | Forget token` while
-  the run is up; when it is stopped, `Pause` and `Stop` give way to
-  **Start run** (only when the web console was started with `--run-unit`,
+- Header panel (⋯): `Pause | Stop after this turn | Restart | Forget token`
+  while the run is up. **Restart** (with `--run-unit`) runs
+  `systemctl --user restart <unit>`: the current turn finishes, then the run
+  starts again with the YAML files reloaded and its progress kept. Use it
+  after editing `coldprompt.yaml` or a session file: `resume` only retries
+  with the configuration loaded at the start. The panel warns when these
+  files changed since the run started. When the run is stopped, `Pause`,
+  `Stop` and `Restart` give way to **Start run** (only when the web console was started with `--run-unit`,
   as the systemd unit does). It runs `systemctl --user start <unit>` after a
   confirmation, so the run reloads the YAML files; one start at a time. If
   the run ends within seconds (invalid config, refused state), the page shows
   the journal lines of that start, secrets masked. While the run is stopped,
-  the panel shows its last known state, and **Archive plan** when the plan is
-  finished (see "Starting a new plan").
+  the panel shows its last known state, **Archive plan** when the plan is
+  finished, and **Reset run** when it is not (see "Starting a new plan").
 - Phone over Tailscale: keep the default localhost bind and run
   `tailscale serve --bg 8787`, then open `https://<host>.<tailnet>.ts.net`.
   Do not bind to `0.0.0.0`.
