@@ -334,9 +334,7 @@ From top to bottom:
    first, it ends only if they pass) and **Skip mission** (`skip`). Not for a
    mission waiting for approval (use **Approve**) or a provider check (fix
    the configuration, then **Restart**).
-4. **Directives** proposed or approved, with **Approve** / **Reject** /
-   **Withdraw**.
-5. **Message box** with two buttons:
+4. **Message box** with two buttons:
 
    | Button | Goes to | Effect on the worker | Needs approval |
    |---|---|---|---|
@@ -353,7 +351,12 @@ From top to bottom:
      turn is never cut. A `PROVIDER_CHECK` block only retries the check: fix
      the configuration and **Restart** instead.
    - Ctrl+Enter asks the supervisor.
-6. **Your messages and their answers**, newest first, right under the box.
+   - Under the box, a folded line lists the directives **queued for the
+     worker's next turn** (approved, not delivered yet), each with
+     **Withdraw**, which cancels it before delivery. Proposals that no answer
+     on the page carries (e.g. made from the terminal console) appear there
+     too, with **Approve** / **Reject**.
+5. **Your messages and their answers**, newest first, right under the box.
    While a message is on its way the page shows *Sending…*, then
    *Supervisor (\<provider\>) is thinking…* until the answer arrives; if
    sending fails, the text comes back in the box. Long answers fold

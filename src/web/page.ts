@@ -65,8 +65,6 @@ export const PAGE_HTML = `<!doctype html>
     <div id="blocked-actions" class="row wrap" hidden></div>
   </section>
 
-  <section id="directives" class="card" hidden></section>
-
   <section id="composer" class="card">
     <form id="send-form">
       <textarea id="text" rows="3" placeholder="Message…"></textarea>
@@ -76,6 +74,7 @@ export const PAGE_HTML = `<!doctype html>
         <span id="composer-hint" class="muted small"></span>
       </div>
     </form>
+    <div id="pending-directives" hidden></div>
   </section>
 
   <div id="exchanges"></div>
@@ -205,7 +204,10 @@ dialog{width:min(900px,96vw);max-height:90vh;border:1px solid var(--line);border
 dialog::backdrop{background:rgba(0,0,0,.45)}
 #report-body h3{font-size:14px;margin:12px 0 4px}
 #blocked-actions{gap:8px;margin-top:8px}
-#directives .d{border-top:1px solid var(--line);padding:8px 0}#directives .d:first-of-type{border-top:none}
+#pending-directives{margin-top:8px;border-top:1px solid var(--line);padding-top:8px;font-size:13.5px}
+#pending-directives summary{cursor:pointer;color:var(--muted)}
+#pending-directives .d{border-top:1px dashed var(--line);padding:6px 0}#pending-directives .d:first-of-type{border-top:none}
+#pending-directives .d .text{max-height:9em;overflow:auto}
 `;
 
 export const APP_JS = String.raw`
@@ -482,27 +484,7 @@ function renderStatus(s) {
     $('#blocked-more').hidden = b.reason.length < 300;
   }
   renderBlockedActions(s);
-  const box = $('#directives');
-  box.textContent = '';
-  const proposed = s.proposedDirectives || [], approved = s.approvedDirectives || [];
-  box.hidden = !proposed.length && !approved.length;
-  if (!box.hidden) {
-    box.append(el('h2', '', 'Directives'));
-    for (const d of proposed) {
-      const row = el('div', 'd');
-      row.append(el('div', 'small muted', d.id + ' · proposed by the supervisor (' + names.supervisor + '), needs your approval'), el('div', 'text', d.content));
-      const actions = el('div', 'row');
-      const ok = el('button', 'primary', 'Approve'); ok.onclick = () => command('approve', d.id);
-      const no = el('button', 'danger', 'Reject'); no.onclick = () => command('reject', d.id);
-      actions.append(ok, no); row.append(actions); box.append(row);
-    }
-    for (const d of approved) {
-      const row = el('div', 'd');
-      row.append(el('div', 'small muted', d.id + ' · approved, delivered at the next turn'), el('div', 'text', d.content));
-      const no = el('button', 'danger', 'Withdraw'); no.onclick = () => command('reject', d.id);
-      row.append(no); box.append(row);
-    }
-  }
+  renderPendingDirectives();
   // "after this turn" only when a turn is actually running.
   const stop = $('#controls [data-cmd="stop"]');
   const turnRunning = !!s.pendingTurn;
@@ -864,6 +846,44 @@ function renderExchanges() {
     box.append(card);
   }
   refreshExchangeActions();
+  renderPendingDirectives();
+}
+
+/**
+ * Under the message box: directives approved but not delivered yet (with
+ * Withdraw), and proposals that no visible answer carries (e.g. made from the
+ * terminal console). Proposals shown in an answer stay in that answer only.
+ */
+function renderPendingDirectives() {
+  const box = $('#pending-directives');
+  box.textContent = '';
+  const s = status || {};
+  const shown = new Set(exchanges.slice(-EXCHANGES_SHOWN).map((x) => x.directiveId).filter(Boolean));
+  const orphans = (s.proposedDirectives || []).filter((d) => !shown.has(d.id));
+  const approved = s.approvedDirectives || [];
+  box.hidden = !orphans.length && !approved.length;
+  if (box.hidden) return;
+  const row = (d, label, buttons) => {
+    const r = el('div', 'd');
+    r.append(el('div', 'small muted', d.id + ' · ' + label), el('div', 'text', d.content));
+    const acts = el('div', 'row');
+    for (const b of buttons) acts.append(b);
+    r.append(acts);
+    return r;
+  };
+  const button = (label, cls, cmd, id) => { const b = el('button', cls, label); b.onclick = () => command(cmd, id); return b; };
+  if (orphans.length) {
+    const sec = el('details', ''); sec.open = true;
+    sec.append(el('summary', '', orphans.length + ' instruction(s) proposed by the supervisor (' + names.supervisor + '), waiting for your approval'));
+    for (const d of orphans) sec.append(row(d, 'proposed', [button('Approve', 'primary', 'approve', d.id), button('Reject', 'danger', 'reject', d.id)]));
+    box.append(sec);
+  }
+  if (approved.length) {
+    const sec = el('details', '');
+    sec.append(el('summary', '', approved.length + " directive(s) queued for the worker's (" + names.worker + ") next turn"));
+    for (const d of approved) sec.append(row(d, 'approved, not delivered yet: Withdraw cancels it', [button('Withdraw', 'danger', 'reject', d.id)]));
+    box.append(sec);
+  }
 }
 
 /** Approve buttons only while the proposed directive is still waiting (status). */
