@@ -295,54 +295,56 @@ the console socket, like `coldprompt console`.
   paste the token in the page. It is sent as a Bearer header, never a
   cookie; the token stays in the browser's local storage until
   "Forget token".
-- Header panel (⋯): `Pause | Stop after this turn | Restart | Forget token`
-  while the run is up. **Restart** (with `--run-unit`) runs
+- Two tabs. **Main**: the run controls, the plan recap (folded; its line
+  shows the session, mission, turn and git state), the block card, the
+  directives, the message box and, right under it, your messages with their
+  answers. **Logs**: the live feed, newest first: worker turns (commands,
+  outputs, file changes, messages), each with the supervisor's decision and
+  its full report. Finished turns are folded (a click on the header opens
+  one); only the running turn stays open. `#tab=logs` in the URL opens it.
+- Labels give the role, then the provider from the configuration
+  (`supervisor.provider`, `worker.provider`), e.g. *supervisor (Claude)* and
+  *worker (Codex)*, so a Claude supervisor and a Claude worker stay distinct.
+- Controls: `Pause | Stop | Restart | Forget token` while the run is up
+  (*Stop after this turn* while a turn is running). **Restart** (with `--run-unit`) runs
   `systemctl --user restart <unit>`: the current turn finishes, then the run
   starts again with the YAML files reloaded and its progress kept. Use it
   after editing `coldprompt.yaml` or a session file: `resume` only retries
-  with the configuration loaded at the start. The panel warns when these
-  files changed since the run started. When the run is stopped, `Pause`,
-  `Stop` and `Restart` give way to **Start run** (only when the web console was started with `--run-unit`,
-  as the systemd unit does). It runs `systemctl --user start <unit>` after a
-  confirmation, so the run reloads the YAML files; one start at a time. If
-  the run ends within seconds (invalid config, refused state), the page shows
-  the journal lines of that start, secrets masked. While the run is stopped,
-  the panel shows its last known state, **Archive plan** when the plan is
-  finished, and **Reset run** when it is not (see "Starting a new plan").
+  with the configuration loaded at the start. The page warns when these
+  files changed since the run started. When the run is stopped, these give
+  way to **Start run** (only with `--run-unit`, as the systemd unit does). It
+  runs `systemctl --user start <unit>` after a confirmation, so the run
+  reloads the YAML files; one start at a time. If the run ends within
+  seconds (invalid config, refused state), the page shows the journal lines
+  of that start, secrets masked. While the run is stopped, the page shows its
+  last known state, **Archive plan** when the plan is finished, and
+  **Reset run** when it is not (see "Starting a new plan").
 - Phone over Tailscale: keep the default localhost bind and run
   `tailscale serve --bg 8787`, then open `https://<host>.<tailnet>.ts.net`.
   Do not bind to `0.0.0.0`.
 
-The four modes above the text box decide where your text goes when you
-press **Send**:
+The message box has two buttons:
 
-| Mode | Goes to | Effect on the worker | Needs approval |
+| Button | Goes to | Effect on the worker | Needs approval |
 |---|---|---|---|
-| **ask** | the supervisor only | none | no |
-| **tell --raw** | the worker | your exact text, at the next turn | no: sending it is the approval |
-| **tell** | the supervisor, then the worker | the directive the supervisor drafts, at the next turn | yes: **Approve** |
-| **resume** | the worker (and the orchestrator) | leaves the block; your text comes with the next turn | no: it is your decision |
+| **Ask supervisor (\<provider\>)** | the supervisor only | none; it may propose an instruction | yes, to deliver its proposal |
+| **Ask worker (\<provider\>)** | the worker | your exact text, at its next turn | no: sending it is the approval |
+| **Resume worker (\<provider\>)** (same button while the run waits for you) | the worker and the orchestrator | leaves `BLOCKED` / `FAILED` / `PAUSED`; your text is the resolution, sent with the next turn | no: it is your decision |
 
-- **ask**: a question. The supervisor answers in the feed from what it
-  has followed so far; the worker is not interrupted and never sees it.
-  Usable at any time, even during a turn. *"Why did you accept although
-  DO08 is not routed?"*
-- **tell --raw**: your own instruction, delivered verbatim at the start
-  of the worker's next turn. A running turn is never cut. *"You may use
-  In1.Cu for DO06_BUF and DO08_BUF."*
-- **tell**: you describe the intent, the supervisor drafts a precise
-  directive, shown under "Directives" with **Approve** / **Reject**.
-  Nothing reaches the worker before you approve.
-- **resume**: leaves `BLOCKED` / `FAILED` (text required: your
-  resolution) or `PAUSED`. The run continues on the same worker thread and
-  the resolution goes to the worker with its next turn (not for a
-  `PROVIDER_CHECK` block, which is about the configuration). While a
-  mission waits for approval, **Approve mission** moves on; **resume**
-  with an instruction keeps working on the current mission instead.
+- **Ask**: a question or a request. The supervisor answers under your
+  message from what it has followed so far; the worker is not interrupted
+  and never sees it. If an instruction to the worker would help, the answer
+  carries it with **Approve → worker** / **Reject**, and **Approve and
+  resume** while the run is blocked. Usable at any time, even during a turn.
+- **Ask / Resume worker**: your own text, after a confirmation. A running
+  turn is never cut. A `PROVIDER_CHECK` block only retries the check: fix
+  the configuration and **Restart** instead.
+- While a message is on its way, the page shows *Sending…*, then
+  *Supervisor (\<provider\>) is thinking…* until the answer arrives. Ctrl+Enter asks the
+  supervisor.
 
-In short: **ask** to understand, **tell --raw** to instruct the worker,
-**tell** to have the supervisor write the instruction, **resume** to
-unblock.
+The console client keeps the underlying commands: `ask`, `tell` (the
+supervisor drafts a directive), `tell --raw`, `resume`, `approve`, `reject`.
 
 ### systemd (instead of tmux)
 
