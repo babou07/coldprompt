@@ -75,7 +75,7 @@ Requires Node.js 22+.
     coldprompt doctor                 # always first
     coldprompt run --dry-run          # prints the prompts; no provider call, repo untouched
     coldprompt run                    # owner process (or the systemd unit below)
-    coldprompt console                # from any shell, including ssh from Termux
+    coldprompt console                # from any shell, including over ssh
     coldprompt web                    # web console (phone, browser)
     coldprompt systemd [--write]      # user units for run + web
     coldprompt send ask "why are you blocked?"
@@ -301,9 +301,14 @@ Ctrl-C on `coldprompt run` stops after the current turn; a second Ctrl-C
 aborts the active turn (it is then recovered as *ambiguous* and needs a
 resolution on restart).
 
-### Remote use (Termux)
+### Remote use
 
-    ssh fedora-host
+From a phone, prefer the **web console** over Tailscale (next section).
+
+From any SSH client (a laptop, or Termux on Android), the line-based console
+works too, e.g. when the web console is not running:
+
+    ssh <host>
     systemctl --user start coldprompt-run   # if not already running (see systemd below)
     coldprompt console
 
