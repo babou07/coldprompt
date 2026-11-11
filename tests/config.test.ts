@@ -172,3 +172,38 @@ test('autoApproveMissions defaults to false; the old approval key is refused wit
     await dir.cleanup();
   }
 });
+
+test('loadConfig expands ${VAR} in the plan from the environment and the .env next to it', async () => {
+  const dir = await tempDir();
+  const saved = process.env.COLDPROMPT_TEST_ENV;
+  try {
+    await writeFile(join(dir.path, '.env'), [
+      '# tools',
+      'COLDPROMPT_HOME=${HOME}/tools',
+      'export COLDPROMPT_TEST_ENV="from-dotenv"',
+      "QUOTED='a b'"
+    ].join('\n') + '\n');
+    await writeFile(join(dir.path, 'one.yaml'), sessionYaml('one', ['a']).replace('do a', '"keep ${COLDPROMPT_UNSET_IN_SESSION}"'));
+    const plan = planYaml(['one.yaml']).replace('name: t', 'name: "${QUOTED}"') + [
+      'verification:',
+      '  commands:',
+      '    - name: check',
+      '      run: sh ${COLDPROMPT_HOME}/check ${COLDPROMPT_TEST_ENV} $${d} ${SHELL_ONLY_VAR}'
+    ].join('\n') + '\n';
+    await writeFile(join(dir.path, 'coldprompt.yaml'), plan);
+    process.env.COLDPROMPT_TEST_ENV = 'from-env';
+    const config = await loadConfig(join(dir.path, 'coldprompt.yaml'));
+    assert.equal(config.project.name, 'a b');
+    assert.equal(config.verification.commands[0].run, `sh ${process.env.HOME}/tools/check from-env \${d} \${SHELL_ONLY_VAR}`);
+    assert.equal(config.missions[0].prompt.content, 'keep ${COLDPROMPT_UNSET_IN_SESSION}');
+    assert.equal(process.env.COLDPROMPT_HOME, undefined, '.env is not exported');
+
+    await writeFile(join(dir.path, 'coldprompt.yaml'), plan.replace('${COLDPROMPT_HOME}', '${COLDPROMPT_TYPO}'));
+    await assert.rejects(loadConfig(join(dir.path, 'coldprompt.yaml')), /COLDPROMPT_TYPO\} is not defined/);
+    await writeFile(join(dir.path, '.env'), 'not a pair\n');
+    await assert.rejects(loadConfig(join(dir.path, 'coldprompt.yaml')), /\.env:1: expected KEY=value/);
+  } finally {
+    if (saved === undefined) delete process.env.COLDPROMPT_TEST_ENV; else process.env.COLDPROMPT_TEST_ENV = saved;
+    await dir.cleanup();
+  }
+});

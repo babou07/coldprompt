@@ -20,6 +20,62 @@ async function readYaml(path: string, what: string): Promise<unknown> {
   }
 }
 
+/**
+ * The `.env` next to coldprompt.yaml, if any: `KEY=value` lines, `#` comments,
+ * optional `export ` and surrounding quotes. A value may use `${VAR}` of the
+ * environment or of an earlier line. Never exported to the process (workers
+ * do not see it): only used to expand the plan.
+ */
+export async function loadDotEnv(configPath: string): Promise<Record<string, string>> {
+  const path = join(dirname(resolve(configPath)), '.env');
+  let source: string;
+  try {
+    source = await readFile(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+    throw new ColdPromptError('INVALID_CONFIG', `Cannot read ${path}: ${(error as Error).message}`);
+  }
+  const vars: Record<string, string> = {};
+  for (const [index, line] of source.split(/\r?\n/).entries()) {
+    const text = line.trim();
+    if (!text || text.startsWith('#')) continue;
+    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(text);
+    if (!match) throw new ColdPromptError('INVALID_CONFIG', `${path}:${index + 1}: expected KEY=value`);
+    let value = match[2];
+    const quoted = /^(["'])(.*)\1$/.exec(value);
+    if (quoted) value = quoted[2];
+    vars[match[1]] = expandVars(value, { ...process.env, ...vars } as Record<string, string>, `${path}:${index + 1}`);
+  }
+  return vars;
+}
+
+/**
+ * Replaces `${NAME}` with its value. `$${` keeps a literal `${` (for shell
+ * code). An unknown name is left as it is (shell variables of `run:`
+ * commands), except names starting with COLDPROMPT_, which must be defined.
+ */
+export function expandVars(text: string, vars: Record<string, string | undefined>, where: string): string {
+  return text.replace(/\$?\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (whole, name: string) => {
+    if (whole.startsWith('$$')) return whole.slice(1);
+    const value = vars[name];
+    if (value !== undefined) return value;
+    if (name.startsWith('COLDPROMPT_')) {
+      throw new ColdPromptError('INVALID_CONFIG', `${where}: \${${name}} is not defined (set it in the environment or in the .env next to coldprompt.yaml)`);
+    }
+    return whole;
+  });
+}
+
+/** Expands `${VAR}` in every string of a parsed YAML value. */
+function expandTree(value: unknown, vars: Record<string, string | undefined>, where: string): unknown {
+  if (typeof value === 'string') return expandVars(value, vars, where);
+  if (Array.isArray(value)) return value.map((v, i) => expandTree(v, vars, `${where}.${i}`));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, expandTree(v, vars, `${where}.${k}`)]));
+  }
+  return value;
+}
+
 const formatIssues = (issues: z.ZodIssue[]): string =>
   issues.map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`).join('\n');
 
@@ -59,10 +115,13 @@ export async function loadSessionFile(path: string, what = 'session file'): Prom
 
 /**
  * Loads coldprompt.yaml (the plan) and the session files it lists, in order.
- * Session paths are relative to coldprompt.yaml.
+ * Session paths are relative to coldprompt.yaml. `${VAR}` in the plan's
+ * strings is expanded from the environment, then the `.env` next to the plan
+ * (the environment wins); session files are not expanded.
  */
 export async function loadConfig(path: string): Promise<Config> {
-  const raw = await readYaml(path, 'config');
+  const vars = { ...await loadDotEnv(path), ...process.env };
+  const raw = expandTree(await readYaml(path, 'config'), vars, basename(path));
   if (raw && typeof raw === 'object' && 'missions' in raw) {
     throw new ColdPromptError('INVALID_CONFIG',
       `Invalid configuration ${path}:\n  - missions: missions are declared in session files, not in coldprompt.yaml. ` +

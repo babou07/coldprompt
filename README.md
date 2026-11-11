@@ -118,6 +118,26 @@ Environment: `COLDPROMPT_CONFIG` (default `coldprompt.yaml`), `COLDPROMPT_HOME`
 See `coldprompt.example.yaml` and `examples/` for a complete example. `coldprompt doctor`
 lists the sessions, their missions and which thread each will use.
 
+**Variables.** `${NAME}` in any string of `coldprompt.yaml` is replaced by
+the environment variable `NAME`, or else by `NAME` from a `.env` file next to
+`coldprompt.yaml` (`KEY=value` lines, `#` comments, optional quotes; a value
+may itself use `${VAR}`). The environment wins over `.env`. Unknown names are
+left as they are (shell variables of `run:` commands), except names starting
+with `COLDPROMPT_`, which must be defined. Write `$${` for a literal `${`.
+Inside `{ … }` or `[ … ]` YAML, quote the value (`name: "${NAME}"`).
+The `.env` is only used to expand the plan: it is not exported to workers or
+commands, and session files are not expanded. Example:
+
+    # .env
+    COLDPROMPT_HOME=${HOME}/.agents/coldprompt
+
+    # coldprompt.yaml
+    verification:
+      commands:
+        - name: push-report
+          when: completion
+          run: sh ${COLDPROMPT_HOME}/scripts/push-if-only reports/study.md
+
 ### Chaining plans: outputs, finalize, proposals
 
     # coldprompt.yaml
