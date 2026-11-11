@@ -277,6 +277,9 @@ providers plug in through `src/adapters/registry.ts` (see
 
 ### Console commands
 
+All actions with their web button, console and command-line forms, and when
+they take effect: [docs/COMMANDS.md](docs/COMMANDS.md).
+
     status                 runtime status
     ask <question>         HOT_PROMPT QUESTION: the supervisor answers, the worker is untouched
     tell <directive>       HOT_PROMPT DIRECTIVE: the supervisor prepares an instruction (needs approve)
