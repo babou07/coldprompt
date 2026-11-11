@@ -18,8 +18,23 @@ Primary stack:
 - Unix socket for interactive console
 - Git-aware verification
 
-Initial platform: Linux, especially Fedora.
-Remote control through SSH and Termux must work.
+Platform: Linux. Remote control must work from any SSH client
+(line-based console) and from a phone through the web console
+(for example over Tailscale).
+
+### Design principles
+
+- Stay generic. ColdPrompt holds no knowledge of any user project.
+  Project specifics live outside it: in skills, scripts and the
+  YAML configuration of the project.
+- Code in ColdPrompt only what must be safe and deterministic:
+  state and its transitions, verification, permissions, logging.
+- Judgment belongs to skills and prompts, not to code: what to do
+  next, how to read a result, what counts as good work for a
+  given project.
+- When a new need appears, first ask whether a skill, a script or
+  a configuration entry can cover it; extend the runtime only for
+  what must be guaranteed.
 
 ## 2. Prompt taxonomy
 
@@ -190,7 +205,10 @@ help
 
 Use a local Unix domain socket with restrictive permissions.
 
-The console must be usable over SSH from Android Termux.
+The console must be usable over SSH from any client, including
+a phone. From a phone, the web console is the preferred path;
+[docs/COMMANDS.md](docs/COMMANDS.md) maps each action to its button,
+console command and command line.
 
 Multiple clients may connect, but all state-changing commands
 must be serialized by the orchestrator.
@@ -333,7 +351,8 @@ Given one session with two COLD_PROMPT missions:
 4. A worker result requires human judgment.
 5. Claude returns BLOCKED.
 6. ColdPrompt stops worker execution.
-7. The user connects from Termux.
+7. The user connects remotely (any SSH client, or the web
+   console from a phone).
 8. The user asks Claude a question via HOT_PROMPT.
 9. Claude answers without changing the worker.
 10. The user submits a directive.
