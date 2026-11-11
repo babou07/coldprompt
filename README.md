@@ -125,18 +125,20 @@ may itself use `${VAR}`). The environment wins over `.env`. Unknown names are
 left as they are (shell variables of `run:` commands), except names starting
 with `COLDPROMPT_`, which must be defined. Write `$${` for a literal `${`.
 Inside `{ … }` or `[ … ]` YAML, quote the value (`name: "${NAME}"`).
+`COLDPROMPT_CONFIG` and `COLDPROMPT_HOME` (the state directory) are
+ColdPrompt's own variables: do not reuse those names for your paths.
 The `.env` is only used to expand the plan: it is not exported to workers or
 commands, and session files are not expanded. Example:
 
     # .env
-    COLDPROMPT_HOME=${HOME}/.agents/coldprompt
+    COLDPROMPT_TOOLS=${HOME}/.agents/coldprompt
 
     # coldprompt.yaml
     verification:
       commands:
         - name: push-report
           when: completion
-          run: sh ${COLDPROMPT_HOME}/scripts/push-if-only reports/study.md
+          run: sh ${COLDPROMPT_TOOLS}/scripts/push-if-only reports/study.md
 
 ### Chaining plans: outputs, finalize, proposals
 

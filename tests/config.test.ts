@@ -179,7 +179,7 @@ test('loadConfig expands ${VAR} in the plan from the environment and the .env ne
   try {
     await writeFile(join(dir.path, '.env'), [
       '# tools',
-      'COLDPROMPT_HOME=${HOME}/tools',
+      'COLDPROMPT_TOOLS=${HOME}/tools',
       'export COLDPROMPT_TEST_ENV="from-dotenv"',
       "QUOTED='a b'"
     ].join('\n') + '\n');
@@ -188,7 +188,7 @@ test('loadConfig expands ${VAR} in the plan from the environment and the .env ne
       'verification:',
       '  commands:',
       '    - name: check',
-      '      run: sh ${COLDPROMPT_HOME}/check ${COLDPROMPT_TEST_ENV} $${d} ${SHELL_ONLY_VAR}'
+      '      run: sh ${COLDPROMPT_TOOLS}/check ${COLDPROMPT_TEST_ENV} $${d} ${SHELL_ONLY_VAR}'
     ].join('\n') + '\n';
     await writeFile(join(dir.path, 'coldprompt.yaml'), plan);
     process.env.COLDPROMPT_TEST_ENV = 'from-env';
@@ -196,9 +196,9 @@ test('loadConfig expands ${VAR} in the plan from the environment and the .env ne
     assert.equal(config.project.name, 'a b');
     assert.equal(config.verification.commands[0].run, `sh ${process.env.HOME}/tools/check from-env \${d} \${SHELL_ONLY_VAR}`);
     assert.equal(config.missions[0].prompt.content, 'keep ${COLDPROMPT_UNSET_IN_SESSION}');
-    assert.equal(process.env.COLDPROMPT_HOME, undefined, '.env is not exported');
+    assert.equal(process.env.COLDPROMPT_TOOLS, undefined, '.env is not exported');
 
-    await writeFile(join(dir.path, 'coldprompt.yaml'), plan.replace('${COLDPROMPT_HOME}', '${COLDPROMPT_TYPO}'));
+    await writeFile(join(dir.path, 'coldprompt.yaml'), plan.replace('${COLDPROMPT_TOOLS}', '${COLDPROMPT_TYPO}'));
     await assert.rejects(loadConfig(join(dir.path, 'coldprompt.yaml')), /COLDPROMPT_TYPO\} is not defined/);
     await writeFile(join(dir.path, '.env'), 'not a pair\n');
     await assert.rejects(loadConfig(join(dir.path, 'coldprompt.yaml')), /\.env:1: expected KEY=value/);
