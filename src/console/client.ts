@@ -3,6 +3,7 @@ import { createInterface, type Interface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import type { CommandRequest, CommandResponse } from '../orchestrator.js';
+import type { State } from '../types.js';
 import { parseCommandLine, type ServerMessage } from './protocol.js';
 
 /** Thin protocol client. It never talks to Claude or Codex directly. */
@@ -91,6 +92,18 @@ export function formatStatus(data: any): string {
   if (data.lastError) lines.push(`last error: ${data.lastError.kind}: ${data.lastError.message}`);
   if (data.git?.isRepo) lines.push(`git: ${data.git.branch}@${String(data.git.head).slice(0, 10)} ${data.git.dirty ? `dirty(${data.git.changedFiles})` : 'clean'}${data.git.upstream ? ` ahead ${data.git.ahead} behind ${data.git.behind}` : ''}`);
   return lines.join('\n');
+}
+
+/** Status text from the saved state, when no orchestrator is running. */
+export function formatPersistedState(state: State): string {
+  return ['(orchestrator not running; persisted state)', formatStatus({
+    status: state.status, mission: null, missionTurns: state.missionTurns, totalTurns: state.totalTurns,
+    workerThreadId: state.activeMissionId ? state.sessions[state.missions[state.activeMissionId]?.session ?? '']?.workerThreadId : undefined,
+    supervisorSessionId: state.supervisorSessionId,
+    pendingTurn: state.pendingTurn, blocked: state.blocked, lastDecision: state.lastDecision, lastReason: state.lastReview?.reason,
+    queuedHotPrompts: state.hotPrompts.filter((h) => h.status === 'QUEUED' || h.status === 'PROCESSING').length,
+    lastError: state.lastError, git: state.lastGit
+  }), `mission index: ${state.missionIndex}, active mission: ${state.activeMissionId ?? '(none)'}`].join('\n');
 }
 
 export function formatEvent(event: { type: string; data: any }): string | undefined {

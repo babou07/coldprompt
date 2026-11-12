@@ -14,7 +14,8 @@ import { ColdPromptError, errorMessage, redact } from './errors.js';
 import { checkProviders, createSupervisor, createWorker, type ProviderContext } from './adapters/registry.js';
 import { FakeSupervisorAdapter, FakeWorkerAdapter } from './adapters/fake.js';
 import { ConsoleServer } from './console/server.js';
-import { formatStatus, runInteractiveConsole, sendOnce } from './console/client.js';
+import { formatPersistedState, runInteractiveConsole, sendOnce } from './console/client.js';
+import { runMcpServer } from './mcp/server.js';
 import { buildFinalizePrompt } from './supervisor.js';
 import { parseCommandLine } from './console/protocol.js';
 import type { Config } from './types.js';
@@ -31,6 +32,9 @@ const USAGE = `Usage: coldprompt <command>
   status              Live status if running, otherwise the persisted state
   doctor              Validate config, worker and supervisor CLIs, repository
   events [n]          Print the last n events (default 20)
+  mcp                 MCP server on stdio for a Claude Code session: the console
+                      commands as tools (status, events, turn, ask_supervisor,
+                      resume, tell, approve, extend, ...) on the running plan
   web [--host H] [--port P] [--run-unit U]
                       Web console (status, live worker activity, HOT_PROMPTs);
                       default 127.0.0.1:8787, token in <COLDPROMPT_HOME>/web-token
@@ -333,17 +337,7 @@ async function main(): Promise<number> {
         const { text } = await sendOnce(store.socketPath, { command: 'status' }, 0);
         console.log(text);
       } catch {
-        const state = await store.load();
-        console.log('(orchestrator not running; persisted state)');
-        console.log(formatStatus({
-          status: state.status, mission: null, missionTurns: state.missionTurns, totalTurns: state.totalTurns,
-          workerThreadId: state.activeMissionId ? state.sessions[state.missions[state.activeMissionId]?.session ?? '']?.workerThreadId : undefined,
-          supervisorSessionId: state.supervisorSessionId,
-          pendingTurn: state.pendingTurn, blocked: state.blocked, lastDecision: state.lastDecision, lastReason: state.lastReview?.reason,
-          queuedHotPrompts: state.hotPrompts.filter((h) => h.status === 'QUEUED' || h.status === 'PROCESSING').length,
-          lastError: state.lastError, git: state.lastGit
-        }));
-        console.log(`mission index: ${state.missionIndex}, active mission: ${state.activeMissionId ?? '(none)'}`);
+        console.log(formatPersistedState(await store.load()));
       }
       return 0;
     }
@@ -370,6 +364,10 @@ async function main(): Promise<number> {
       console.log('the next "coldprompt run" (or Start run) starts the plan from its first mission');
       return 0;
     }
+    case 'mcp':
+      // stdout carries the MCP protocol only.
+      await runMcpServer(store);
+      return 0;
     case 'events': {
       const n = Number(args[1] ?? 20);
       for (const e of (await store.readEvents()).slice(-n)) console.log(`${e.timestamp} ${e.type} ${JSON.stringify(e.data)}`);

@@ -304,6 +304,33 @@ Ctrl-C on `coldprompt run` stops after the current turn; a second Ctrl-C
 aborts the active turn (it is then recovered as *ambiguous* and needs a
 resolution on restart).
 
+### Claude Code (MCP server)
+
+`coldprompt mcp` is an MCP server on stdio: a Claude Code session gets the
+console commands as tools on the running plan, so it can read a block,
+fix the repository and resume the run itself. It is a client of the console
+socket, like `coldprompt console`; without a running orchestrator the read
+tools fall back to the saved state.
+
+| Tool | Console command |
+|---|---|
+| `status`, `directives` | `status`, `directives` |
+| `events`, `turn` | last events; one turn's worker report, review, verification and completion records (read from the state directory) |
+| `ask_supervisor` | `ask` (waits for the answer; never unblocks) |
+| `resume`, `tell`, `approve`, `reject`, `extend`, `complete`, `skip`, `pause`, `stop` | same names |
+
+Register it once (user scope; the config path selects the plan and its
+state directory):
+
+    claude mcp add coldprompt --scope user \
+      -e COLDPROMPT_CONFIG=$HOME/workspace/coldprompt.yaml \
+      -- $HOME/workspace/coldprompt/bin/coldprompt mcp
+
+Read tools are marked read-only; Claude Code asks before every other tool
+unless you allow it (`/permissions`, e.g. allow `mcp__coldprompt__status`,
+`mcp__coldprompt__events`, `mcp__coldprompt__turn`,
+`mcp__coldprompt__directives`).
+
 ### Remote use
 
 From a phone, prefer the **web console** over Tailscale (next section).
