@@ -35,6 +35,10 @@ Platform: Linux. Remote control must work from any SSH client
 - When a new need appears, first ask whether a skill, a script or
   a configuration entry can cover it; extend the runtime only for
   what must be guaranteed.
+- Ask the worker only for evidence its sandbox can produce. A proof
+  that needs more access (a desktop application, a socket, a key) is
+  a verification command: ColdPrompt runs it outside the sandbox and
+  shows its output, and the prompt names that output instead.
 
 ## 2. Prompt taxonomy
 
